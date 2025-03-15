@@ -3,7 +3,7 @@ use crate::gsrel::{GSRelData, set_privilege_level};
 use crate::signal::SignalHandlers;
 use crate::sud::enable_sud;
 
-const CLONE_SIGHAND: u64 = 0x00000800;
+const CLONE_SIGHAND: u64 = 0x0000_0800;
 
 /// Sets up the per-thread data structures for a newly created thread.
 ///

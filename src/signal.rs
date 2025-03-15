@@ -5,7 +5,7 @@ use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
 use std::ptr::null;
 
-const SA_UNSUPPORTED: i32 = 0x00000400;
+const SA_UNSUPPORTED: i32 = 0x0000_0400;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -209,7 +209,10 @@ impl SignalHandlers {
 
 				// Initialize handler fields
 				unsafe {
-					(*new_handler_ptr).handler = mem::transmute(new_kernel_act.sa_sigaction);
+					(*new_handler_ptr).handler = mem::transmute::<
+						usize,
+						unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+					>(new_kernel_act.sa_sigaction);
 					(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
 					(*new_handler_ptr).restorer = None;
 					(*new_handler_ptr).mask = new_kernel_act.sa_mask;
@@ -244,7 +247,10 @@ impl SignalHandlers {
 
 				// Initialize handler fields
 				unsafe {
-					(*new_handler_ptr).handler = mem::transmute(new_kernel_act.sa_sigaction);
+					(*new_handler_ptr).handler = mem::transmute::<
+						usize,
+						unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+					>(new_kernel_act.sa_sigaction);
 					(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
 					(*new_handler_ptr).restorer = None;
 					(*new_handler_ptr).mask = new_kernel_act.sa_mask;
@@ -289,7 +295,10 @@ impl SignalHandlers {
 
 		// Initialize handler fields
 		unsafe {
-			(*new_handler_ptr).handler = mem::transmute(new_kernel_act.sa_sigaction);
+			(*new_handler_ptr).handler = mem::transmute::<
+				usize,
+				unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+			>(new_kernel_act.sa_sigaction);
 			(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
 			(*new_handler_ptr).restorer = None;
 			(*new_handler_ptr).mask = new_kernel_act.sa_mask;

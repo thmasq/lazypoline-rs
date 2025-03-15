@@ -14,69 +14,48 @@ static SYSCALL_INTERCEPTIONS: AtomicUsize = AtomicUsize::new(0);
 static VDSO_SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 static REWRITTEN_SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
-// SIGSYS handler for intercepted system calls
-// This is called by the kernel when a system call is intercepted by SUD
-unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
-	// Update interception counter
+fn track_syscall_interception() -> bool {
 	let intercept_count = SYSCALL_INTERCEPTIONS.fetch_add(1, Ordering::Relaxed) + 1;
-
 	// Only log every 100th interception after the first 10 to avoid log spam
-	let should_log = intercept_count <= 10 || intercept_count % 100 == 0;
+	intercept_count <= 10 || intercept_count % 100 == 0
+}
 
-	if should_log {
-		debug!("sigsys: Handling SIGSYS signal... (#{intercept_count})...");
-	}
-
-	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
-
-	let sysinfo = unsafe { crate::ffi::SigSysInfo::from_siginfo(info) };
-
-	// Verify this is a SUD-triggered SIGSYS
+unsafe fn verify_sigsys_info(sig: c_int, sysinfo: *const crate::ffi::SigSysInfo) {
 	assert_eq!(sig, SIGSYS);
-	assert_eq!(unsafe { (*sysinfo).si_signo }, SIGSYS);
+	assert_eq!((unsafe { *sysinfo }).si_signo, SIGSYS);
 	assert_eq!(
-		unsafe { (*sysinfo).si_code },
+		(unsafe { *sysinfo }).si_code,
 		SYS_USER_DISPATCH,
 		"SUD does not support safely running non-SUD SIGSYS handlers!"
 	);
-	assert_eq!(unsafe { (*sysinfo).si_errno }, 0);
+	assert_eq!((unsafe { *sysinfo }).si_errno, 0);
+}
 
-	let syscall_num = unsafe { (*sysinfo).si_syscall };
-	let call_addr = unsafe { (*sysinfo).si_call_addr };
-
-	if should_log {
-		// Log the system call details
-		debug!("sigsys: Intercepted syscall {syscall_num} at address {call_addr:p}");
+unsafe fn handle_zpoline_rewriting(call_addr: *const c_void, should_log: bool) {
+	if !crate::zpoline::REWRITE_TO_ZPOLINE {
+		return;
 	}
 
-	if crate::zpoline::REWRITE_TO_ZPOLINE {
-		let syscall_addr = unsafe { call_addr.cast::<u16>().offset(-1) };
+	// Cast with the correct mutability for the required functions
+	let syscall_addr = unsafe { call_addr.cast::<u16>().offset(-1) }.cast_mut();
+	let vdso = get_vdso_location();
+	let in_vdso = vdso.contains(call_addr.cast::<u8>().cast_mut());
 
-		let vdso = get_vdso_location();
-		let in_vdso = vdso.contains(call_addr.cast::<u8>());
-
-		if in_vdso {
-			if should_log {
-				debug!("sigsys: Not rewriting VDSO syscall at address {syscall_addr:p}");
-			}
-			VDSO_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-		} else {
-			if should_log {
-				debug!("sigsys: Rewriting non-VDSO syscall at address {syscall_addr:p}");
-			}
-			unsafe { crate::zpoline::rewrite_syscall_inst(syscall_addr) };
-			REWRITTEN_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+	if in_vdso {
+		if should_log {
+			debug!("sigsys: Not rewriting VDSO syscall at address {syscall_addr:p}");
 		}
+		VDSO_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+	} else {
+		if should_log {
+			debug!("sigsys: Rewriting non-VDSO syscall at address {syscall_addr:p}");
+		}
+		unsafe { crate::zpoline::rewrite_syscall_inst(syscall_addr) };
+		REWRITTEN_SYSCALLS.fetch_add(1, Ordering::Relaxed);
 	}
+}
 
-	let uctxt = unsafe { &mut *context.cast::<libc::ucontext_t>() };
-	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
-
-	assert_eq!(
-		unsafe { *gregs.add(libc::REG_RAX as usize) },
-		i64::from(unsafe { (*sysinfo).si_syscall })
-	);
-
+unsafe fn log_register_values(gregs: *mut i64) {
 	unsafe {
 		trace!("sigsys: RAX (syscall number): {}", *gregs.add(libc::REG_RAX as usize));
 		trace!("sigsys: RDI (arg1): 0x{:x}", *gregs.add(libc::REG_RDI as usize));
@@ -88,7 +67,9 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 		trace!("sigsys: RSP: 0x{:x}", *gregs.add(libc::REG_RSP as usize));
 		trace!("sigsys: RIP: 0x{:x}", *gregs.add(libc::REG_RIP as usize));
 	}
+}
 
+unsafe fn setup_stack_for_syscall_hook(gregs: *mut i64) {
 	// Push RIP and RAX to set up stack for asm_syscall_hook
 	unsafe {
 		*gregs.add(libc::REG_RSP as usize) -= 2 * std::mem::size_of::<u64>() as i64;
@@ -97,7 +78,44 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 		*stack_bottom.add(1) = *gregs.add(libc::REG_RIP as usize);
 		*stack_bottom = *gregs.add(libc::REG_RAX as usize);
 	}
+}
 
+// SIGSYS handler for intercepted system calls
+// This is called by the kernel when a system call is intercepted by SUD
+unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
+	let should_log = track_syscall_interception();
+
+	if should_log {
+		debug!("sigsys: Handling SIGSYS signal...");
+	}
+
+	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
+
+	let sysinfo = unsafe { crate::ffi::SigSysInfo::from_siginfo(info) };
+	unsafe { verify_sigsys_info(sig, sysinfo) };
+
+	let syscall_num = (unsafe { *sysinfo }).si_syscall;
+	let call_addr = (unsafe { *sysinfo }).si_call_addr;
+
+	if should_log {
+		debug!("sigsys: Intercepted syscall {syscall_num} at address {call_addr:p}");
+	}
+
+	unsafe { handle_zpoline_rewriting(call_addr, should_log) };
+
+	let uctxt = unsafe { &mut *context.cast::<libc::ucontext_t>() };
+	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
+
+	assert_eq!(
+		unsafe { *gregs.add(libc::REG_RAX as usize) },
+		i64::from((unsafe { *sysinfo }).si_syscall)
+	);
+
+	unsafe { log_register_values(gregs) };
+
+	unsafe { setup_stack_for_syscall_hook(gregs) };
+
+	#[allow(clippy::items_after_statements)]
 	unsafe extern "C" {
 		fn asm_syscall_hook();
 	}
@@ -105,7 +123,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 
 	assert_eq!(
 		unsafe { *gregs.add(libc::REG_RAX as usize) },
-		i64::from(unsafe { (*sysinfo).si_syscall })
+		i64::from((unsafe { *sysinfo }).si_syscall)
 	);
 
 	debug!("sigsys: Handler completed, redirecting to asm_syscall_hook");
@@ -202,8 +220,10 @@ pub fn print_sud_stats() {
 	info!("  Rewritten syscalls: {rewritten}");
 
 	if interceptions > 0 {
-		let vdso_percent = (vdso_calls as f64 / interceptions as f64) * 100.0;
-		let rewritten_percent = (rewritten as f64 / interceptions as f64) * 100.0;
+		#[allow(clippy::cast_precision_loss)]
+		let vdso_percent = (vdso_calls * 10000 / interceptions) as f64 / 100.0;
+		#[allow(clippy::cast_precision_loss)]
+		let rewritten_percent = (rewritten * 10000 / interceptions) as f64 / 100.0;
 
 		info!("  VDSO syscalls: {vdso_percent:.2}%");
 		info!("  Rewritten syscalls: {rewritten_percent:.2}%");
@@ -248,7 +268,7 @@ pub unsafe fn enable_sud() {
 		Ok(()) => {
 			info!("sud: SUD enabled successfully");
 
-			// Register atexit handler to print statistics on program exit
+			#[allow(clippy::items_after_statements)]
 			extern "C" fn print_stats_at_exit() {
 				print_sud_stats();
 			}
@@ -274,6 +294,7 @@ pub unsafe fn enable_sud() {
 
 // ELF64 header format
 #[repr(C)]
+#[allow(clippy::struct_field_names)]
 struct Elf64Ehdr {
 	e_ident: [u8; 16],
 	e_type: u16,
@@ -293,6 +314,7 @@ struct Elf64Ehdr {
 
 // ELF64 program header format
 #[repr(C)]
+#[allow(clippy::struct_field_names)]
 struct Elf64Phdr {
 	p_type: u32,
 	p_flags: u32,
@@ -329,14 +351,22 @@ static VDSO_LOCATION: once_cell::sync::Lazy<VdsoLocation> = once_cell::sync::Laz
 		let vdso_addr = libc::getauxval(libc::AT_SYSINFO_EHDR) as *const u8;
 		assert!(!vdso_addr.is_null(), "Failed to get VDSO address");
 
-		// Parse ELF header
-		let hdr = &*vdso_addr.cast::<Elf64Ehdr>();
+		// Parse ELF header - Fix for pointer alignment issue
+		// Create a properly aligned copy of the ELF header
+		let mut ehdr: Elf64Ehdr = std::mem::zeroed();
+		std::ptr::copy_nonoverlapping(
+			vdso_addr,
+			(&raw mut ehdr).cast::<u8>(),
+			std::mem::size_of::<Elf64Ehdr>(),
+		);
+		let hdr = &ehdr;
 
 		// Verify this is a valid ELF header
 		assert_eq!(&hdr.e_ident[..4], b"\x7fELF", "Invalid ELF header in VDSO");
 
-		// Calculate program header table address
-		let phdr = (vdso_addr as usize + hdr.e_phoff as usize) as *const Elf64Phdr;
+		// Calculate program header table address - Fix for possible truncation
+		let e_phoff = usize::try_from(hdr.e_phoff).expect("Program header offset too large for usize");
+		let phdr = (vdso_addr as usize + e_phoff) as *const Elf64Phdr;
 
 		// Find the highest address in any segment to determine total size
 		let mut max_addr = 0;
@@ -347,8 +377,10 @@ static VDSO_LOCATION: once_cell::sync::Lazy<VdsoLocation> = once_cell::sync::Laz
 			if entry.p_type == 1 {
 				// PT_LOAD = 1
 				let segment_end = entry.p_vaddr + entry.p_memsz;
-				if segment_end as usize > max_addr {
-					max_addr = segment_end as usize;
+				let segment_end_usize = usize::try_from(segment_end).expect("Segment end address too large for usize");
+
+				if segment_end_usize > max_addr {
+					max_addr = segment_end_usize;
 				}
 			}
 		}

@@ -10,6 +10,7 @@ unsafe extern "C" {
 }
 
 static REWRITE_LOCK: SpinLock = SpinLock::new();
+const NUM_SYSCALLS: usize = 512;
 
 pub const REWRITE_TO_ZPOLINE: bool = true;
 #[allow(dead_code)]
@@ -34,6 +35,18 @@ const COMPAT_NONDEP_APP: bool = false;
 /// # Returns
 ///
 /// Ok(()) on success, or Err with an error message on failure
+///
+/// # Errors
+///
+/// This function returns an error in the following situations:
+/// - If mapping the zero page fails (e.g., when `mmap_min_addr` is not set to 0)
+/// - If making the zero page executable fails due to permission issues
+///
+/// # Panics
+///
+/// This function will panic if:
+/// - The `NUM_SYSCALLS` constant is not equal to 512, which is a requirement for the
+///   trampoline setup logic
 ///
 /// # Safety
 ///
@@ -68,28 +81,26 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 
 	debug!("zpoline: Zero page mapped successfully at address {zeropage:p}");
 
-	const NUM_SYSCALLS: usize = 512;
-
 	let zeropage_slice = unsafe { slice::from_raw_parts_mut(zeropage.cast::<u8>(), 0x1000) };
 
 	debug!("zpoline: Setting up syscall trampolines...");
 
-	for i in 0..NUM_SYSCALLS {
+	for (i, byte) in zeropage_slice.iter_mut().take(NUM_SYSCALLS).enumerate() {
 		assert_eq!(NUM_SYSCALLS, 512);
 
 		if i >= 0x19b {
 			if i % 2 == 0 {
-				zeropage_slice[i] = 0x66; // Single-byte NOP
+				*byte = 0x66; // Single-byte NOP
 			} else {
-				zeropage_slice[i] = 0x90; // Start of 2-byte NOP
+				*byte = 0x90; // Start of 2-byte NOP
 			}
 		} else {
-			match i % 3 {
-				0 => zeropage_slice[i] = 0xeb, // RIP += 0x66 (short jump) to next short jump
-				1 => zeropage_slice[i] = 0x66, // 2-byte NOP -> short jump
-				2 => zeropage_slice[i] = 0x90, // Single-byte NOP -> short jump
+			*byte = match i % 3 {
+				0 => 0xeb, // RIP += 0x66 (short jump) to next short jump
+				1 => 0x66, // 2-byte NOP -> short jump
+				2 => 0x90, // Single-byte NOP -> short jump
 				_ => unreachable!(),
-			}
+			};
 		}
 	}
 
@@ -112,14 +123,11 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	let hook_addr = asm_syscall_hook as usize;
 	debug!("zpoline: asm_syscall_hook at address 0x{hook_addr:x}");
 
-	zeropage_slice[NUM_SYSCALLS + 0x3] = hook_addr as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x4] = (hook_addr >> 8) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x5] = (hook_addr >> (8 * 2)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x6] = (hook_addr >> (8 * 3)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x7] = (hook_addr >> (8 * 4)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x8] = (hook_addr >> (8 * 5)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x9] = (hook_addr >> (8 * 6)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0xa] = (hook_addr >> (8 * 7)) as u8;
+	// Store hook address as individual bytes using to_ne_bytes for architecture-independent conversion
+	let hook_addr_bytes = hook_addr.to_ne_bytes();
+	for (i, &byte) in hook_addr_bytes.iter().enumerate() {
+		zeropage_slice[NUM_SYSCALLS + 0x3 + i] = byte;
+	}
 
 	// jmpq *%rax
 	zeropage_slice[NUM_SYSCALLS + 0xb] = 0xff;
@@ -167,7 +175,8 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 /// - Modifies thread state
 /// - Must maintain specific register state
 #[unsafe(no_mangle)]
-pub extern "C" fn zpoline_syscall_handler(
+#[allow(clippy::similar_names)]
+pub unsafe extern "C" fn zpoline_syscall_handler(
 	rdi: i64,
 	rsi: i64,
 	rdx: i64,
@@ -179,7 +188,7 @@ pub extern "C" fn zpoline_syscall_handler(
 	should_emulate: *mut u64,
 ) -> i64 {
 	let _ = rip_after_syscall;
-	crate::lazypoline::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate)
+	unsafe { crate::lazypoline::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate) }
 }
 
 /// Rewrites a syscall instruction to use the zpoline mechanism.
@@ -208,7 +217,9 @@ pub extern "C" fn zpoline_syscall_handler(
 pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 	debug!("zpoline: Rewriting syscall at address {syscall_addr:p}");
 
-	let syscall_page = align_down(syscall_addr as usize, 0x1000) as *mut c_void;
+	// Convert to usize for alignment calculation, then back to pointer type
+	let syscall_page_addr = align_down(syscall_addr as usize, 0x1000);
+	let syscall_page = syscall_page_addr as *mut c_void;
 
 	let _guard = SpinLockGuard::new(&REWRITE_LOCK);
 

@@ -85,6 +85,7 @@ impl GSRelData {
 ///
 /// This function is safe but relies on properly initialized GS register
 /// and `GSRelData` structure.
+#[allow(clippy::inline_always)]
 #[inline(always)]
 #[must_use]
 pub fn get_privilege_level() -> u8 {
@@ -115,6 +116,7 @@ pub fn get_privilege_level() -> u8 {
 ///
 /// This function is safe but relies on properly initialized GS register
 /// and `GSRelData` structure.
+#[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn set_privilege_level(level: u8) {
 	unsafe {

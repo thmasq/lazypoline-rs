@@ -101,7 +101,7 @@ pub extern "C" fn init_lazypoline() {
 /// - Manipulates thread and process state
 /// - Modifies memory that may be shared between threads
 #[unsafe(no_mangle)]
-pub extern "C" fn syscall_emulate(
+pub unsafe extern "C" fn syscall_emulate(
 	syscall_no: i64,
 	a1: i64,
 	mut a2: i64,
@@ -170,24 +170,23 @@ pub extern "C" fn syscall_emulate(
 
 				*should_emulate = 1;
 				return libc::SYS_clone;
-			} else {
-				assert_eq!(stack, 0, "Stack must be NULL for fork-like clone");
-				assert_eq!(flags & CLONE_THREAD, 0, "CLONE_THREAD not supported");
-				assert_eq!(flags & CLONE_SIGHAND as u64, 0, "CLONE_SIGHAND not supported");
-				assert_eq!(flags & CLONE_VFORK, 0, "CLONE_VFORK not supported in fork-like clone");
-				assert_eq!(flags & CLONE_VM, 0, "CLONE_VM not supported in fork-like clone");
-
-				let result = syscall6(syscall_no as c_long, a1, a2, a3, a4, a5, a6);
-
-				do_postfork_handling(result as i64);
-				return result as i64;
 			}
+
+			assert_eq!(stack, 0, "Stack must be NULL for fork-like clone");
+			assert_eq!(flags & CLONE_THREAD, 0, "CLONE_THREAD not supported");
+			assert_eq!(flags & CLONE_SIGHAND as u64, 0, "CLONE_SIGHAND not supported");
+			assert_eq!(flags & CLONE_VFORK, 0, "CLONE_VFORK not supported in fork-like clone");
+			assert_eq!(flags & CLONE_VM, 0, "CLONE_VM not supported in fork-like clone");
+
+			let result = syscall6(syscall_no as c_long, a1, a2, a3, a4, a5, a6);
+
+			do_postfork_handling(result as i64);
+			return result as i64;
 		}
 
 		if syscall_no == libc::SYS_rt_sigprocmask {
 			let how = a1 as c_int;
 			let set = a2 as *const libc::sigset_t;
-			let _oldset = a3 as *mut libc::sigset_t;
 			let sigsetsize = a4 as usize;
 
 			assert!(sigsetsize <= mem::size_of::<libc::sigset_t>(), "sigsetsize too large");
@@ -197,7 +196,13 @@ pub extern "C" fn syscall_emulate(
 			if !set.is_null() && (how == SIG_BLOCK || how == SIG_SETMASK) {
 				ptr::copy_nonoverlapping(set.cast::<u8>(), modifiable_mask.as_mut_ptr(), sigsetsize);
 
-				let modified_set = modifiable_mask.as_mut_ptr().cast::<libc::sigset_t>();
+				let mut aligned_mask = mem::MaybeUninit::<libc::sigset_t>::uninit();
+				ptr::copy_nonoverlapping(
+					modifiable_mask.as_ptr(),
+					aligned_mask.as_mut_ptr().cast::<u8>(),
+					sigsetsize,
+				);
+				let modified_set = aligned_mask.as_mut_ptr();
 				libc::sigdelset(modified_set, libc::SIGSYS);
 				a2 = modified_set as i64;
 			}
@@ -233,12 +238,12 @@ pub extern "C" fn syscall_emulate(
 }
 
 unsafe fn do_postfork_handling(result: i64) {
-	if result < 0 {
-	} else if result > 0 {
-	} else {
-		unsafe {
-			enable_sud();
-		}
+	match result {
+		r if r < 0 => {},
+		r if r > 0 => {},
+		_ => {
+			unsafe { enable_sud() };
+		},
 	}
 }
 

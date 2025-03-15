@@ -67,7 +67,7 @@ impl SigSysInfo {
 /// # Returns
 ///
 /// Returns the system call's return value. Negative values typically indicate errors.
-#[inline(always)]
+#[inline]
 #[must_use]
 pub unsafe fn syscall6(
 	num: c_long,
@@ -141,9 +141,13 @@ impl SpinLock {
 	///
 	/// # Safety
 	///
-	/// This method is safe to call, but the caller should ensure they actually
+	/// This method is safe to call, but the caller must ensure they actually
 	/// hold the lock before calling. Calling `unlock` on a lock that isn't held
-	/// may lead to undefined behavior for other threads trying to acquire the lock.
+	/// by the current thread will lead to undefined behavior for other threads
+	/// trying to acquire the lock and may cause data corruption or deadlocks.
+	///
+	/// Generally, you should prefer using `SpinLockGuard` instead of manually
+	/// calling `lock` and `unlock`.
 	pub fn unlock(&self) {
 		self.lock.store(false, Ordering::Release);
 	}
@@ -390,6 +394,7 @@ pub unsafe fn rt_sigprocmask_raw(how: c_int, set: *const sigset_t, oldset: *mut 
 #[inline]
 #[must_use]
 pub const fn align_down(addr: usize, align: usize) -> usize {
+	debug_assert!(align.is_power_of_two(), "align must be a power of 2");
 	addr & !(align - 1)
 }
 
@@ -410,6 +415,7 @@ pub const fn align_down(addr: usize, align: usize) -> usize {
 #[inline]
 #[must_use]
 pub const fn align_up(addr: usize, align: usize) -> usize {
+	debug_assert!(align.is_power_of_two(), "align must be a power of 2");
 	(addr + align - 1) & !(align - 1)
 }
 
@@ -453,9 +459,14 @@ pub struct PageAligned<T>(pub T);
 /// # Errors
 ///
 /// Returns an error if the prctl call fails, which could happen if:
-/// - The kernel does not support `PR_SET_SYSCALL_USER_DISPATCH`
-/// - The arguments are invalid
-/// - Permission is denied
+/// - The kernel does not support `PR_SET_SYSCALL_USER_DISPATCH` (EINVAL)
+/// - The arguments are invalid (EINVAL):
+///   - Invalid action (not `PR_SYS_DISPATCH_ON` or `PR_SYS_DISPATCH_OFF`)
+///   - Invalid or inaccessible `selector_ptr`
+/// - Permission is denied (EPERM):
+///   - The process does not have `CAP_SYS_ADMIN` capability
+/// - Resource limits are exceeded (ENOMEM):
+///   - Not enough memory to set up the dispatch tables
 pub fn set_syscall_user_dispatch(action: c_int, selector_ptr: *const u8) -> Result<(), std::io::Error> {
 	debug!(
 		"FFI: Calling prctl with PR_SET_SYSCALL_USER_DISPATCH ({PR_SET_SYSCALL_USER_DISPATCH}), action {action}, selector_ptr {selector_ptr:p}"

@@ -31,10 +31,3 @@ lto = "fat"
 strip = true
 codegen-units = 1
 panic = "abort"
-
-[build]
-rustflags = ["-C", "target-feature=+fsgsbase"]
-
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-arg=-nostartfiles"]
-

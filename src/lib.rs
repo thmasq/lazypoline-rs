@@ -5,7 +5,7 @@
 //!
 //! # Usage
 //!
-//! Build this library as a cdylib and load it using LD_PRELOAD:
+//! Build this library as a cdylib and load it using `LD_PRELOAD`:
 //!
 //! ```bash
 //! LIBLAZYPOLINE="path/to/liblazypoline.so" LD_PRELOAD="path/to/libbootstrap.so" your_application
@@ -41,7 +41,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_initialization() {
+	const fn test_initialization() {
 		// This test is more of a placeholder - actual testing would involve
 		// running a real program with lazypoline loaded
 		// Real testing is done with the executable in the C++ version

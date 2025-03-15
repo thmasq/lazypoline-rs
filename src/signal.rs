@@ -18,7 +18,7 @@ pub struct KernelSigaction {
 
 const NSIG: usize = 64;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SigDispType {
 	Ign,
 	Term,
@@ -45,7 +45,7 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 
 	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
 
-	let uctxt = unsafe { &mut *(context as *mut ucontext_t) };
+	let uctxt = unsafe { &mut *context.cast::<ucontext_t>() };
 	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
 	let rsp = unsafe { *gregs.add(libc::REG_RSP as usize) };
 
@@ -75,9 +75,10 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 }
 
 impl SignalHandlers {
+	#[must_use]
 	pub fn new() -> *mut Self {
 		unsafe {
-			let handlers = libc::malloc(std::mem::size_of::<Self>()) as *mut Self;
+			let handlers = libc::malloc(std::mem::size_of::<Self>()).cast::<Self>();
 			assert!(!handlers.is_null(), "Failed to allocate SignalHandlers");
 
 			// Create a MaybeUninit for dfl_handler
@@ -94,7 +95,7 @@ impl SignalHandlers {
 
 			// Create a MaybeUninit array for app_handlers
 			let mut app_handlers_uninit: MaybeUninit<[KernelSigaction; NSIG]> = MaybeUninit::uninit();
-			let app_handlers_ptr = app_handlers_uninit.as_mut_ptr() as *mut KernelSigaction;
+			let app_handlers_ptr = app_handlers_uninit.as_mut_ptr().cast::<KernelSigaction>();
 
 			// Initialize each element in the array
 			for i in 0..NSIG {
@@ -153,8 +154,8 @@ impl SignalHandlers {
 		let app_handler = unsafe { self.get_app_handler(sig as usize) };
 
 		// We don't want to emulate SIG_DFL or SIG_IGN
-		assert_ne!(app_handler.handler as usize, SIG_DFL as usize);
-		assert_ne!(app_handler.handler as usize, SIG_IGN as usize);
+		assert_ne!(app_handler.handler as usize, { SIG_DFL });
+		assert_ne!(app_handler.handler as usize, { SIG_IGN });
 
 		if app_handler.flags & libc::SA_RESETHAND as u64 != 0 {
 			let app_handlers_ptr = self.app_handlers.get();
@@ -187,10 +188,10 @@ impl SignalHandlers {
 			return 0;
 		}
 
-		if newact.is_null() || (unsafe { *newact }).sa_sigaction == SIG_IGN as usize {
+		if newact.is_null() || (unsafe { *newact }).sa_sigaction == SIG_IGN {
 			let result = unsafe { rt_sigaction_raw(signo, newact, oldact, 8) };
 			if result != 0 {
-				return result as i64;
+				return i64::from(result);
 			}
 
 			if !oldact.is_null() {
@@ -223,14 +224,14 @@ impl SignalHandlers {
 			return 0;
 		}
 
-		if (unsafe { *newact }).sa_sigaction == SIG_DFL as usize {
+		if (unsafe { *newact }).sa_sigaction == SIG_DFL {
 			let result = unsafe { rt_sigaction_raw(signo, newact, oldact, 8) };
 			if result == 0 {
 				// Get old value before updating
-				let old = if !oldact.is_null() {
-					unsafe { self.get_kernel_sigaction(signo as usize) }
-				} else {
+				let old = if oldact.is_null() {
 					unsafe { mem::zeroed() }
+				} else {
+					unsafe { self.get_kernel_sigaction(signo as usize) }
 				};
 
 				// Update app_handlers directly
@@ -259,7 +260,7 @@ impl SignalHandlers {
 					unsafe { *oldact = old };
 				}
 			}
-			return result as i64;
+			return i64::from(result);
 		}
 
 		let mut newact_cpy = unsafe { *newact };
@@ -268,14 +269,14 @@ impl SignalHandlers {
 
 		let result = unsafe { rt_sigaction_raw(signo, &newact_cpy, oldact, 8) };
 		if result != 0 {
-			return result as i64;
+			return i64::from(result);
 		}
 
 		// Get old value before updating
-		let old = if !oldact.is_null() {
-			unsafe { self.get_kernel_sigaction(signo as usize) }
-		} else {
+		let old = if oldact.is_null() {
 			unsafe { mem::zeroed() }
+		} else {
+			unsafe { self.get_kernel_sigaction(signo as usize) }
 		};
 
 		// Update app_handlers directly
@@ -321,7 +322,7 @@ impl SignalHandlers {
 		act
 	}
 
-	fn get_default_behavior(signo: c_int) -> SigDispType {
+	const fn get_default_behavior(signo: c_int) -> SigDispType {
 		match signo {
 			// Ignored signals
 			libc::SIGCHLD | libc::SIGURG | libc::SIGWINCH => SigDispType::Ign,
@@ -363,6 +364,7 @@ impl SignalHandlers {
 		}
 	}
 
+	#[allow(dead_code)]
 	fn is_terminating_sig(signo: c_int) -> bool {
 		let behavior = Self::get_default_behavior(signo);
 		behavior == SigDispType::Term || behavior == SigDispType::Core

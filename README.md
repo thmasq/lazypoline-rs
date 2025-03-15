@@ -13,7 +13,7 @@ This is a Rust port of the original C++ implementation from "System Call Interpo
 Use Cargo to build the project:
 
 ```bash
-cargo build --release
+cargo build --release --workspace
 ```
 
 This builds two shared libraries:

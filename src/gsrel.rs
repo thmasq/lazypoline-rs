@@ -36,6 +36,7 @@ pub struct GSRelData {
 }
 
 impl GSRelData {
+	#[must_use]
 	pub fn new() -> *mut Self {
 		unsafe {
 			let mem = mmap_at_addr(
@@ -48,11 +49,11 @@ impl GSRelData {
 			);
 
 			assert!(
-				!mem.is_null() && mem != libc::MAP_FAILED as *mut c_void,
+				!mem.is_null() && mem != libc::MAP_FAILED.cast::<c_void>(),
 				"Failed to allocate GSRelData"
 			);
 
-			let gsreldata = mem as *mut Self;
+			let gsreldata = mem.cast::<Self>();
 			(*gsreldata).sud_selector = UnsafeCell::new(SYSCALL_DISPATCH_FILTER_BLOCK);
 			(*gsreldata).signal_handlers = UnsafeCell::new(null_mut());
 
@@ -72,8 +73,10 @@ impl GSRelData {
 }
 
 #[inline(always)]
+#[must_use]
 pub fn get_privilege_level() -> u8 {
 	unsafe {
+		#[allow(unused_assignments)]
 		let mut value: u8 = 0;
 		std::arch::asm!(
 			"mov {0}, gs:[{1}]",
@@ -101,7 +104,14 @@ pub struct UnblockScope {
 	old_selector: u8,
 }
 
+impl Default for UnblockScope {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl UnblockScope {
+	#[must_use]
 	pub fn new() -> Self {
 		let old_selector = get_privilege_level();
 		set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
@@ -120,7 +130,14 @@ pub struct BlockScope {
 	old_selector: u8,
 }
 
+impl Default for BlockScope {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl BlockScope {
+	#[must_use]
 	pub fn new() -> Self {
 		let old_selector = get_privilege_level();
 		set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_BLOCK);

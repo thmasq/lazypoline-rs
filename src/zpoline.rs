@@ -11,8 +11,11 @@ unsafe extern "C" {
 static REWRITE_LOCK: SpinLock = SpinLock::new();
 
 pub const REWRITE_TO_ZPOLINE: bool = true;
+#[allow(dead_code)]
 const PRINT_SYSCALLS: bool = true;
+#[allow(dead_code)]
 const SAVE_VECTOR_REGS: bool = true;
+#[allow(dead_code)]
 const RETURN_IMMEDIATELY: bool = false;
 const COMPAT_NONDEP_APP: bool = false;
 
@@ -31,7 +34,7 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 		)
 	};
 
-	if zeropage == libc::MAP_FAILED as *mut c_void {
+	if zeropage == libc::MAP_FAILED.cast::<c_void>() {
 		eprintln!(
 			"zpoline: Error: Failed to map zero page with MAP_FIXED: {}",
 			std::io::Error::last_os_error()
@@ -40,11 +43,11 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 		return Err("Failed to map zero page");
 	}
 
-	eprintln!("zpoline: Zero page mapped successfully at address {:p}", zeropage);
+	eprintln!("zpoline: Zero page mapped successfully at address {zeropage:p}");
 
 	const NUM_SYSCALLS: usize = 512;
 
-	let zeropage_slice = unsafe { slice::from_raw_parts_mut(zeropage as *mut u8, 0x1000) };
+	let zeropage_slice = unsafe { slice::from_raw_parts_mut(zeropage.cast::<u8>(), 0x1000) };
 
 	eprintln!("zpoline: Setting up syscall trampolines...");
 
@@ -76,7 +79,7 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	// jmpq   *%rax             (0xff 0xe0)
 
 	// Save %rax on stack
-	zeropage_slice[NUM_SYSCALLS + 0x0] = 0x50;
+	zeropage_slice[NUM_SYSCALLS] = 0x50;
 
 	// movabs asm_syscall_hook, %rax
 	zeropage_slice[NUM_SYSCALLS + 0x1] = 0x48;
@@ -84,10 +87,10 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 
 	// 64-bit address of asm_syscall_hook, byte by byte
 	let hook_addr = asm_syscall_hook as usize;
-	eprintln!("zpoline: asm_syscall_hook at address 0x{:x}", hook_addr);
+	eprintln!("zpoline: asm_syscall_hook at address 0x{hook_addr:x}");
 
-	zeropage_slice[NUM_SYSCALLS + 0x3] = (hook_addr >> (8 * 0)) as u8;
-	zeropage_slice[NUM_SYSCALLS + 0x4] = (hook_addr >> (8 * 1)) as u8;
+	zeropage_slice[NUM_SYSCALLS + 0x3] = hook_addr as u8;
+	zeropage_slice[NUM_SYSCALLS + 0x4] = (hook_addr >> 8) as u8;
 	zeropage_slice[NUM_SYSCALLS + 0x5] = (hook_addr >> (8 * 2)) as u8;
 	zeropage_slice[NUM_SYSCALLS + 0x6] = (hook_addr >> (8 * 3)) as u8;
 	zeropage_slice[NUM_SYSCALLS + 0x7] = (hook_addr >> (8 * 4)) as u8;
@@ -134,7 +137,7 @@ pub extern "C" fn zpoline_syscall_handler(
 }
 
 pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
-	eprintln!("zpoline: Rewriting syscall at address {:p}", syscall_addr);
+	eprintln!("zpoline: Rewriting syscall at address {syscall_addr:p}");
 
 	let syscall_page = align_down(syscall_addr as usize, 0x1000) as *mut c_void;
 

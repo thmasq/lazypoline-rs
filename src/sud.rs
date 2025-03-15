@@ -25,25 +25,25 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	// In a real implementation, we'd need to rewrite the syscall instruction here
 	// if it's not in the VDSO
 	if crate::zpoline::REWRITE_TO_ZPOLINE {
-		let syscall_addr = unsafe { ((*sysinfo).si_call_addr as *mut u16).offset(-1) };
+		let syscall_addr = unsafe { (*sysinfo).si_call_addr.cast::<u16>().offset(-1) };
 
 		// Check if the syscall is in the VDSO (this is simplified)
 		// In a real implementation, we'd need to check against the actual VDSO address range
 		let vdso = get_vdso_location();
-		if !vdso.contains((unsafe { *sysinfo }).si_call_addr as *mut u8) {
+		if !vdso.contains((unsafe { *sysinfo }).si_call_addr.cast::<u8>()) {
 			unsafe { crate::zpoline::rewrite_syscall_inst(syscall_addr) };
 		}
 	}
 
 	// Emulate the system call by invoking asm_syscall_hook
 	// Set up the stack as if we were coming from the rewritten call
-	let uctxt = unsafe { &mut *(context as *mut libc::ucontext_t) };
+	let uctxt = unsafe { &mut *context.cast::<libc::ucontext_t>() };
 	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
 
 	// Verify syscall number
 	assert_eq!(
 		unsafe { *gregs.add(libc::REG_RAX as usize) },
-		(unsafe { *sysinfo }).si_syscall as i64
+		i64::from((unsafe { *sysinfo }).si_syscall)
 	);
 	unsafe {
 		eprintln!("sigsys: RAX (syscall number): {}", *gregs.add(libc::REG_RAX as usize));
@@ -70,7 +70,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	// Ensure rax still contains the syscall number
 	assert_eq!(
 		unsafe { *gregs.add(libc::REG_RAX as usize) },
-		(unsafe { *sysinfo }).si_syscall as i64
+		i64::from((unsafe { *sysinfo }).si_syscall)
 	);
 
 	eprintln!("sigsys: Handler completed, redirecting to asm_syscall_hook");
@@ -103,19 +103,19 @@ pub unsafe fn enable_sud() {
 	eprintln!("sud: Enabling Syscall User Dispatch...");
 	// Get the GS base address
 	let gs_base = unsafe { get_gs_base() };
-	eprintln!("sud: GS base address: 0x{:x}", gs_base);
+	eprintln!("sud: GS base address: 0x{gs_base:x}");
 
 	// Calculate address of the SUD selector
 	let selector_addr = gs_base + SUD_SELECTOR_OFFSET as u64;
-	eprintln!("sud: SUD selector address: 0x{:x}", selector_addr);
+	eprintln!("sud: SUD selector address: 0x{selector_addr:x}");
 
 	// Enable SUD
 	match set_syscall_user_dispatch(PR_SYS_DISPATCH_ON, selector_addr as *const u8) {
-		Ok(_) => {
+		Ok(()) => {
 			eprintln!("sud: SUD enabled successfully");
 		},
 		Err(e) => {
-			eprintln!("sud: Failed to enable Syscall User Dispatch: {}", e);
+			eprintln!("sud: Failed to enable Syscall User Dispatch: {e}");
 			panic!("Failed to enable SUD");
 		},
 	}

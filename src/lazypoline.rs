@@ -28,11 +28,11 @@ pub extern "C" fn init_lazypoline() {
 		if REWRITE_TO_ZPOLINE {
 			eprintln!("lazypoline: Initializing zpoline mechanism...");
 			match init_zpoline() {
-				Ok(_) => {
+				Ok(()) => {
 					eprintln!("lazypoline: zpoline initialization successful");
 				},
 				Err(e) => {
-					eprintln!("lazypoline: Failed to initialize zpoline: {}", e);
+					eprintln!("lazypoline: Failed to initialize zpoline: {e}");
 					std::process::exit(1);
 				},
 			}
@@ -81,25 +81,25 @@ pub extern "C" fn syscall_emulate(
 			);
 		}
 
-		assert_ne!(syscall_no, libc::SYS_unshare as i64);
+		assert_ne!(syscall_no, { libc::SYS_unshare });
 
-		if syscall_no == libc::SYS_clone3 as i64 {
-			return -libc::ENOSYS as i64;
+		if syscall_no == libc::SYS_clone3 {
+			return i64::from(-libc::ENOSYS);
 		}
 
-		if syscall_no == libc::SYS_fork as i64 {
+		if syscall_no == libc::SYS_fork {
 			let result = syscall6(syscall_no as c_long, a1, a2, a3, a4, a5, a6);
 
 			do_postfork_handling(result as i64);
 			return result as i64;
 		}
 
-		if syscall_no == libc::SYS_vfork as i64 {
+		if syscall_no == libc::SYS_vfork {
 			*should_emulate = 1;
-			return libc::SYS_vfork as i64;
+			return libc::SYS_vfork;
 		}
 
-		if syscall_no == libc::SYS_clone as i64 {
+		if syscall_no == libc::SYS_clone {
 			let flags = a1 as u64;
 			let stack = a2 as usize;
 
@@ -109,14 +109,14 @@ pub extern "C" fn syscall_emulate(
 				assert_eq!(flags & CLONE_VFORK, 0, "CLONE_VFORK with CLONE_THREAD is weird");
 
 				*should_emulate = 1;
-				return libc::SYS_clone as i64;
+				return libc::SYS_clone;
 			} else if flags & CLONE_VFORK != 0 {
 				assert_ne!(stack, 0, "Stack must be provided for CLONE_VFORK");
 				assert_ne!(flags & CLONE_VM, 0, "CLONE_VM must be set with CLONE_VFORK");
 				assert_eq!(flags & CLONE_THREAD, 0, "CLONE_THREAD with CLONE_VFORK is invalid");
 
 				*should_emulate = 1;
-				return libc::SYS_clone as i64;
+				return libc::SYS_clone;
 			} else {
 				assert_eq!(stack, 0, "Stack must be NULL for fork-like clone");
 				assert_eq!(flags & CLONE_THREAD, 0, "CLONE_THREAD not supported");
@@ -131,7 +131,7 @@ pub extern "C" fn syscall_emulate(
 			}
 		}
 
-		if syscall_no == libc::SYS_rt_sigprocmask as i64 {
+		if syscall_no == libc::SYS_rt_sigprocmask {
 			let how = a1 as c_int;
 			let set = a2 as *const libc::sigset_t;
 			let _oldset = a3 as *mut libc::sigset_t;
@@ -142,9 +142,9 @@ pub extern "C" fn syscall_emulate(
 			let mut modifiable_mask = [0u8; 128];
 
 			if !set.is_null() && (how == SIG_BLOCK || how == SIG_SETMASK) {
-				ptr::copy_nonoverlapping(set as *const u8, modifiable_mask.as_mut_ptr(), sigsetsize);
+				ptr::copy_nonoverlapping(set.cast::<u8>(), modifiable_mask.as_mut_ptr(), sigsetsize);
 
-				let modified_set = modifiable_mask.as_mut_ptr() as *mut libc::sigset_t;
+				let modified_set = modifiable_mask.as_mut_ptr().cast::<libc::sigset_t>();
 				libc::sigdelset(modified_set, libc::SIGSYS);
 				a2 = modified_set as i64;
 			}
@@ -154,7 +154,7 @@ pub extern "C" fn syscall_emulate(
 			return result as i64;
 		}
 
-		if syscall_no == libc::SYS_rt_sigaction as i64 {
+		if syscall_no == libc::SYS_rt_sigaction {
 			let gsreldata = gsrel::GSRelData::new();
 			let signal_handlers = *(*gsreldata).signal_handlers.get();
 
@@ -166,12 +166,12 @@ pub extern "C" fn syscall_emulate(
 			return result;
 		}
 
-		if syscall_no == libc::SYS_rt_sigreturn as i64 {
+		if syscall_no == libc::SYS_rt_sigreturn {
 			*should_emulate = 1;
-			return libc::SYS_rt_sigreturn as i64;
+			return libc::SYS_rt_sigreturn;
 		}
 
-		if syscall_no == libc::SYS_exit as i64 {
+		if syscall_no == libc::SYS_exit {
 			teardown_thread_metadata();
 		}
 
@@ -189,7 +189,7 @@ unsafe fn do_postfork_handling(result: i64) {
 	}
 }
 
-fn get_syscall_name(sysno: usize) -> &'static str {
+const fn get_syscall_name(sysno: usize) -> &'static str {
 	match sysno {
 		0 => "read",
 		1 => "write",

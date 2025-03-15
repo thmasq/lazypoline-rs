@@ -34,13 +34,13 @@ pub struct SigSysInfo {
 }
 
 impl SigSysInfo {
-	pub unsafe fn from_siginfo(info: *mut libc::siginfo_t) -> *mut SigSysInfo {
-		info as *mut SigSysInfo
+	pub const unsafe fn from_siginfo(info: *mut libc::siginfo_t) -> *mut Self {
+		info.cast::<Self>()
 	}
 }
 
 #[inline(always)]
-pub unsafe fn syscall6(
+#[must_use] pub unsafe fn syscall6(
 	num: c_long,
 	arg1: c_long,
 	arg2: c_long,
@@ -72,8 +72,14 @@ pub struct SpinLock {
 	lock: AtomicBool,
 }
 
+impl Default for SpinLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpinLock {
-	pub const fn new() -> Self {
+	#[must_use] pub const fn new() -> Self {
 		Self {
 			lock: AtomicBool::new(false),
 		}
@@ -103,7 +109,7 @@ impl<'a> SpinLockGuard<'a> {
 	}
 }
 
-impl<'a> Drop for SpinLockGuard<'a> {
+impl Drop for SpinLockGuard<'_> {
 	fn drop(&mut self) {
 		self.lock.unlock();
 	}
@@ -148,13 +154,13 @@ pub unsafe fn mprotect_raw(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
 }
 
 #[inline]
-pub unsafe fn get_gs_base() -> u64 {
+#[must_use] pub unsafe fn get_gs_base() -> u64 {
 	let mut value: u64 = 0;
 	unsafe {
 		let result = syscall6(
 			libc::SYS_arch_prctl as c_long,
 			ARCH_GET_GS as c_long,
-			&mut value as *mut u64 as c_long,
+			&raw mut value as c_long,
 			0,
 			0,
 			0,
@@ -166,7 +172,7 @@ pub unsafe fn get_gs_base() -> u64 {
 }
 
 #[inline]
-pub unsafe fn set_gs_base(value: u64) -> c_int {
+#[must_use] pub unsafe fn set_gs_base(value: u64) -> c_int {
 	unsafe {
 		syscall6(
 			libc::SYS_arch_prctl as c_long,
@@ -216,12 +222,12 @@ pub unsafe fn rt_sigprocmask_raw(how: c_int, set: *const sigset_t, oldset: *mut 
 }
 
 #[inline]
-pub fn align_down(addr: usize, align: usize) -> usize {
+#[must_use] pub const fn align_down(addr: usize, align: usize) -> usize {
 	addr & !(align - 1)
 }
 
 #[inline]
-pub fn align_up(addr: usize, align: usize) -> usize {
+#[must_use] pub const fn align_up(addr: usize, align: usize) -> usize {
 	(addr + align - 1) & !(align - 1)
 }
 
@@ -241,8 +247,7 @@ pub struct PageAligned<T>(pub T);
 
 pub fn set_syscall_user_dispatch(action: c_int, selector_ptr: *const u8) -> Result<(), std::io::Error> {
 	eprintln!(
-		"FFI: Calling prctl with PR_SET_SYSCALL_USER_DISPATCH ({}), action {}, selector_ptr {:p}",
-		PR_SET_SYSCALL_USER_DISPATCH, action, selector_ptr
+		"FFI: Calling prctl with PR_SET_SYSCALL_USER_DISPATCH ({PR_SET_SYSCALL_USER_DISPATCH}), action {action}, selector_ptr {selector_ptr:p}"
 	);
 
 	let result = unsafe {

@@ -19,6 +19,28 @@ const SAVE_VECTOR_REGS: bool = true;
 const RETURN_IMMEDIATELY: bool = false;
 const COMPAT_NONDEP_APP: bool = false;
 
+/// Initializes the zpoline mechanism for efficient syscall interposition.
+///
+/// This function:
+/// 1. Maps the zero page in memory (requires mmap_min_addr=0)
+/// 2. Sets up syscall trampolines in the zero page
+/// 3. Creates a jump to the asm_syscall_hook function
+/// 4. Makes the zero page executable
+///
+/// The zpoline mechanism works by rewriting syscall instructions to
+/// `call [rax+0]`, which jumps through the zero page to our hook.
+///
+/// # Returns
+///
+/// Ok(()) on success, or Err with an error message on failure
+///
+/// # Safety
+///
+/// This function is unsafe because it:
+/// - Maps memory at address 0 (requires kernel configuration)
+/// - Creates executable memory
+/// - Modifies global process state
+/// - Must be called before any syscalls are intercepted
 pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	eprintln!("zpoline: Initializing zpoline mechanism...");
 	eprintln!("zpoline: Attempting to map zero page...");
@@ -119,7 +141,30 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	Ok(())
 }
 
-// Called from asm_syscall_hook with unblocked SUD
+/// Handles a syscall that was redirected via the zpoline mechanism.
+///
+/// This function is called from the assembly hook (asm_syscall_hook) when
+/// a rewritten syscall instruction is executed. It forwards the syscall
+/// to `syscall_emulate` for actual handling.
+///
+/// # Parameters
+///
+/// * `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` - The syscall arguments
+/// * `rax` - The syscall number
+/// * `rip_after_syscall` - The instruction pointer after the syscall
+/// * `should_emulate` - Output parameter that indicates special handling
+///
+/// # Returns
+///
+/// The result of the syscall
+///
+/// # Safety
+///
+/// This function is unsafe because it:
+/// - Is called directly from assembly
+/// - Handles raw syscall arguments
+/// - Modifies thread state
+/// - Must maintain specific register state
 #[unsafe(no_mangle)]
 pub extern "C" fn zpoline_syscall_handler(
 	rdi: i64,
@@ -136,6 +181,29 @@ pub extern "C" fn zpoline_syscall_handler(
 	unsafe { crate::lazypoline::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate) }
 }
 
+/// Rewrites a syscall instruction to use the zpoline mechanism.
+///
+/// This function modifies a syscall instruction (0x0F05) to a call-near [rax+0]
+/// instruction (0xD0FF), which redirects execution through the zero page
+/// to our hook function.
+///
+/// # Parameters
+///
+/// * `syscall_addr` - Pointer to the syscall instruction to rewrite
+///
+/// # Panics
+///
+/// Panics if:
+/// - Memory protection cannot be changed
+/// - The syscall instruction cannot be rewritten
+///
+/// # Safety
+///
+/// This function is unsafe because it:
+/// - Modifies executable code at runtime
+/// - Changes memory protection settings
+/// - Must be called with a valid syscall instruction address
+/// - Must be synchronized with execution (instruction must not be executing)
 pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 	eprintln!("zpoline: Rewriting syscall at address {syscall_addr:p}");
 
@@ -187,7 +255,4 @@ pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 			panic!("Failed to restore syscall page permissions");
 		}
 	}
-
-	// For debugging
-	// eprintln!("Rewrote syscall at {:p}", syscall_addr);
 }

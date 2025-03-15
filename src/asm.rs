@@ -27,7 +27,7 @@ pub extern "C" fn teardown_thread_metadata() {
 		let gs_base = crate::ffi::get_gs_base();
 		let result = crate::ffi::syscall6(
 			libc::SYS_munmap,
-			gs_base as i64,
+			gs_base.try_into().unwrap(),
 			4096, // Page size
 			0,
 			0,

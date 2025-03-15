@@ -17,6 +17,28 @@ unsafe extern "C" {
 	pub fn teardown_thread_metadata();
 }
 
+/// Initializes the lazypoline syscall interposition mechanism.
+///
+/// This function sets up all the necessary components for syscall interception:
+/// 1. Initializes Syscall User Dispatch (SUD)
+/// 2. Sets up the zpoline mechanism for efficient syscall handling
+/// 3. Enables SUD for the current process
+/// 4. Blocks syscalls through the SUD mechanism
+///
+/// # Panics
+///
+/// Panics if:
+/// - SUD initialization fails
+/// - zpoline initialization fails (if REWRITE_TO_ZPOLINE is true)
+/// - Privilege level cannot be set
+///
+/// # Safety
+///
+/// This function is unsafe because it:
+/// - Modifies global process state by enabling SUD
+/// - Changes memory protection settings
+/// - Requires a correct `LD_PRELOAD` and bootstrap setup
+/// - Needs `/proc/sys/vm/mmap_min_addr` set to 0
 #[unsafe(no_mangle)]
 pub extern "C" fn init_lazypoline() {
 	eprintln!("Initializing lazypoline!");
@@ -47,6 +69,35 @@ pub extern "C" fn init_lazypoline() {
 	}
 }
 
+/// Emulates or handles a system call based on its number and arguments.
+///
+/// This function is called from the assembly hook when a syscall is intercepted.
+/// It provides custom handling for certain syscalls (fork, clone, vfork, rt_sigreturn, etc.)
+/// and passes through other syscalls to the kernel.
+///
+/// # Parameters
+///
+/// * `syscall_no` - The syscall number
+/// * `a1`-`a6` - The syscall arguments
+/// * `should_emulate` - Output parameter that indicates whether the syscall should be
+///    emulated by the assembly hook (1) or handled directly (0)
+///
+/// # Returns
+///
+/// The syscall result or an error code
+///
+/// # Panics
+///
+/// Panics if:
+/// - An unsupported syscall variant is used (e.g., unshare)
+/// - Invalid combinations of clone flags are provided
+///
+/// # Safety
+///
+/// This function is unsafe because it:
+/// - Directly interacts with kernel syscall interfaces
+/// - Manipulates thread and process state
+/// - Modifies memory that may be shared between threads
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_emulate(
 	syscall_no: i64,

@@ -6,7 +6,7 @@ A Rust implementation of the lazypoline syscall interposition system.
 
 **lazypoline-rs** is a fast, exhaustive, and expressive syscall interposer for user-space Linux applications. It uses a _hybrid interposition_ mechanism based on Syscall User Dispatch (SUD) and binary rewriting to exhaustively interpose all syscalls with maximal efficiency.
 
-This is a Rust port of the original C++ implementation from "System Call Interposition Without Compromise" (DSN'24 paper).
+This is a Rust port of the original C++ implementation from "[System Call Interposition Without Compromise](https://adriaanjacobs.github.io/files/dsn24lazypoline.pdf)" (DSN'24 paper).
 
 ## Building
 

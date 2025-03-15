@@ -1,0 +1,41 @@
+[package]
+name = "lazypoline-rs"
+version = "0.1.0"
+authors = ["Thomas Q <thomasqsa@gmail.com>"]
+edition = "2024"
+license = "GPL-3.0-only"
+readme = "README.md"
+description = "A fast, exhaustive, and expressive syscall interposer for user-space Linux applications, rewritten in Rust"
+
+[lib]
+name = "lazypoline"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = { version = "0.2", features = ["extra_traits"] }
+nix = "0.29"
+once_cell = "1.21"
+
+[workspace]
+resolver = "3"
+members = ["bootstrap"]
+
+[build-dependencies]
+cc = "1.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+strip = true
+codegen-units = 1
+
+[build]
+rustflags = ["-C", "target-feature=+fsgsbase"]
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[[example]]
+name = "test_lazypoline"
+path = "tests/test_lazypoline.rs"
+

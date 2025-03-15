@@ -1,0 +1,14 @@
+[package]
+name = "lazypoline-bootstrap"
+version = "0.1.0"
+authors = ["Thomas Q <thomasqsa@gmail.com>"]
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Bootstrap loader for lazypoline-rs"
+
+[lib]
+name = "bootstrap"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"

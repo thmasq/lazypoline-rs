@@ -21,6 +21,11 @@ This builds two shared libraries:
 - `target/release/liblazypoline.so` - The main lazypoline library
 - `target/release/libbootstrap.so` - The bootstrap loader
 
+The bootstrapper needs elevated privileges to use the SUD mechanism, and especially mapping to the zero page memory. For that I recommend setting permissions to the binary:
+```bash
+sudo setcap cap_sys_admin,cap_sys_rawio+ep target/release/libbootstrap.so
+```
+
 ## Running
 
 lazypoline-rs can hook syscalls in precompiled binaries by setting the appropriate environment variables when launching:

@@ -4,6 +4,7 @@ use crate::sud::{enable_sud, init_sud};
 use crate::zpoline::init_zpoline;
 use libc::{CLONE_SIGHAND, SIG_BLOCK, SIG_SETMASK, c_int, c_long};
 use std::mem;
+use tracing::{debug, error, info};
 
 // Configuration
 const PRINT_SYSCALLS: bool = true;
@@ -29,7 +30,7 @@ unsafe extern "C" {
 ///
 /// Panics if:
 /// - SUD initialization fails
-/// - zpoline initialization fails (if REWRITE_TO_ZPOLINE is true)
+/// - zpoline initialization fails (if `REWRITE_TO_ZPOLINE` is true)
 /// - Privilege level cannot be set
 ///
 /// # Safety
@@ -41,38 +42,39 @@ unsafe extern "C" {
 /// - Needs `/proc/sys/vm/mmap_min_addr` set to 0
 #[unsafe(no_mangle)]
 pub extern "C" fn init_lazypoline() {
-	eprintln!("Initializing lazypoline!");
+	crate::logging::init();
+	info!("Initializing lazypoline!");
 
 	unsafe {
-		eprintln!("lazypoline: Initializing Syscall User Dispatch (SUD)...");
+		debug!("Initializing Syscall User Dispatch (SUD)...");
 		init_sud();
 
 		if REWRITE_TO_ZPOLINE {
-			eprintln!("lazypoline: Initializing zpoline mechanism...");
+			debug!("Initializing zpoline mechanism...");
 			match init_zpoline() {
 				Ok(()) => {
-					eprintln!("lazypoline: zpoline initialization successful");
+					debug!("zpoline initialization successful");
 				},
 				Err(e) => {
-					eprintln!("lazypoline: Failed to initialize zpoline: {e}");
+					error!("Failed to initialize zpoline: {e}");
 					std::process::exit(1);
 				},
 			}
 		}
 
-		eprintln!("lazypoline: Enabling SUD...");
+		debug!("Enabling SUD...");
 		enable_sud();
 
-		eprintln!("lazypoline: Setting privilege level to BLOCK...");
+		debug!("Setting privilege level to BLOCK...");
 		set_privilege_level(SYSCALL_DISPATCH_FILTER_BLOCK);
-		eprintln!("lazypoline: Initialization completed successfully!");
+		debug!("Initialization completed successfully!");
 	}
 }
 
 /// Emulates or handles a system call based on its number and arguments.
 ///
 /// This function is called from the assembly hook when a syscall is intercepted.
-/// It provides custom handling for certain syscalls (fork, clone, vfork, rt_sigreturn, etc.)
+/// It provides custom handling for certain syscalls (fork, clone, vfork, `rt_sigreturn`, etc.)
 /// and passes through other syscalls to the kernel.
 ///
 /// # Parameters
@@ -118,7 +120,7 @@ pub extern "C" fn syscall_emulate(
 
 		if PRINT_SYSCALLS {
 			let syscall_name = get_syscall_name(syscall_no as usize);
-			eprintln!(
+			debug!(
 				"\x1b[31m[{}] syscall({} [{}], 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x})\x1b[m",
 				libc::getpid(),
 				syscall_name,

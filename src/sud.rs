@@ -4,6 +4,7 @@ use crate::signal::SignalHandlers;
 use libc::{SA_SIGINFO, SIGSYS, c_int};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::{debug, error, info, trace};
 
 // This value is used to identify SIGSYS signals triggered by Syscall User Dispatch
 const SYS_USER_DISPATCH: i32 = 2;
@@ -23,7 +24,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	let should_log = intercept_count <= 10 || intercept_count % 100 == 0;
 
 	if should_log {
-		eprintln!("sigsys: Handling SIGSYS signal... (#{intercept_count})...");
+		debug!("sigsys: Handling SIGSYS signal... (#{intercept_count})...");
 	}
 
 	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
@@ -45,7 +46,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 
 	if should_log {
 		// Log the system call details
-		eprintln!("sigsys: Intercepted syscall {syscall_num} at address {call_addr:p}");
+		debug!("sigsys: Intercepted syscall {syscall_num} at address {call_addr:p}");
 	}
 
 	if crate::zpoline::REWRITE_TO_ZPOLINE {
@@ -56,12 +57,12 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 
 		if in_vdso {
 			if should_log {
-				eprintln!("sigsys: Not rewriting VDSO syscall at address {syscall_addr:p}");
+				debug!("sigsys: Not rewriting VDSO syscall at address {syscall_addr:p}");
 			}
 			VDSO_SYSCALLS.fetch_add(1, Ordering::Relaxed);
 		} else {
 			if should_log {
-				eprintln!("sigsys: Rewriting non-VDSO syscall at address {syscall_addr:p}");
+				debug!("sigsys: Rewriting non-VDSO syscall at address {syscall_addr:p}");
 			}
 			unsafe { crate::zpoline::rewrite_syscall_inst(syscall_addr) };
 			REWRITTEN_SYSCALLS.fetch_add(1, Ordering::Relaxed);
@@ -77,15 +78,15 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	);
 
 	unsafe {
-		eprintln!("sigsys: RAX (syscall number): {}", *gregs.add(libc::REG_RAX as usize));
-		eprintln!("sigsys: RDI (arg1): 0x{:x}", *gregs.add(libc::REG_RDI as usize));
-		eprintln!("sigsys: RSI (arg2): 0x{:x}", *gregs.add(libc::REG_RSI as usize));
-		eprintln!("sigsys: RDX (arg3): 0x{:x}", *gregs.add(libc::REG_RDX as usize));
-		eprintln!("sigsys: R10 (arg4): 0x{:x}", *gregs.add(libc::REG_R10 as usize));
-		eprintln!("sigsys: R8 (arg5): 0x{:x}", *gregs.add(libc::REG_R8 as usize));
-		eprintln!("sigsys: R9 (arg6): 0x{:x}", *gregs.add(libc::REG_R9 as usize));
-		eprintln!("sigsys: RSP: 0x{:x}", *gregs.add(libc::REG_RSP as usize));
-		eprintln!("sigsys: RIP: 0x{:x}", *gregs.add(libc::REG_RIP as usize));
+		trace!("sigsys: RAX (syscall number): {}", *gregs.add(libc::REG_RAX as usize));
+		trace!("sigsys: RDI (arg1): 0x{:x}", *gregs.add(libc::REG_RDI as usize));
+		trace!("sigsys: RSI (arg2): 0x{:x}", *gregs.add(libc::REG_RSI as usize));
+		trace!("sigsys: RDX (arg3): 0x{:x}", *gregs.add(libc::REG_RDX as usize));
+		trace!("sigsys: R10 (arg4): 0x{:x}", *gregs.add(libc::REG_R10 as usize));
+		trace!("sigsys: R8 (arg5): 0x{:x}", *gregs.add(libc::REG_R8 as usize));
+		trace!("sigsys: R9 (arg6): 0x{:x}", *gregs.add(libc::REG_R9 as usize));
+		trace!("sigsys: RSP: 0x{:x}", *gregs.add(libc::REG_RSP as usize));
+		trace!("sigsys: RIP: 0x{:x}", *gregs.add(libc::REG_RIP as usize));
 	}
 
 	// Push RIP and RAX to set up stack for asm_syscall_hook
@@ -107,13 +108,13 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 		i64::from(unsafe { (*sysinfo).si_syscall })
 	);
 
-	eprintln!("sigsys: Handler completed, redirecting to asm_syscall_hook");
+	debug!("sigsys: Handler completed, redirecting to asm_syscall_hook");
 }
 
 /// Initializes the Syscall User Dispatch (SUD) mechanism.
 ///
 /// This function:
-/// 1. Maps the GSRelData structure for thread-local storage
+/// 1. Maps the `GSRelData` structure for thread-local storage
 /// 2. Sets the initial privilege level
 /// 3. Initializes signal handlers
 /// 4. Sets up the SIGSYS handler for SUD
@@ -121,7 +122,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 /// # Panics
 ///
 /// Panics if:
-/// - GSRelData allocation fails
+/// - `GSRelData` allocation fails
 /// - Signal handler setup fails
 ///
 /// # Safety
@@ -131,16 +132,16 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 /// - Sets up signal handlers that affect the entire process
 /// - Must be called before enabling SUD
 pub unsafe fn init_sud() {
-	eprintln!("sud: Initializing Syscall User Dispatch (SUD)...");
+	info!("sud: Initializing Syscall User Dispatch (SUD)...");
 
 	// Map GSRelData structure
 	let gsreldata = GSRelData::new();
 	assert!(!gsreldata.is_null(), "Failed to allocate GSRelData structure");
-	eprintln!("sud: GSRelData mapped at address {gsreldata:p}");
+	info!("sud: GSRelData mapped at address {gsreldata:p}");
 
 	// Initialize the SUD selector
 	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
-	eprintln!("sud: SUD selector initialized to ALLOW");
+	info!("sud: SUD selector initialized to ALLOW");
 
 	// Allocate and initialize signal handlers
 	let signal_handlers = SignalHandlers::new();
@@ -148,10 +149,10 @@ pub unsafe fn init_sud() {
 		!signal_handlers.is_null(),
 		"Failed to allocate SignalHandlers structure"
 	);
-	eprintln!("sud: SignalHandlers allocated at address {signal_handlers:p}");
+	info!("sud: SignalHandlers allocated at address {signal_handlers:p}");
 
 	unsafe { *(*gsreldata).signal_handlers.get() = signal_handlers };
-	eprintln!("sud: SignalHandlers registered with GSRelData");
+	info!("sud: SignalHandlers registered with GSRelData");
 
 	// Set up SIGSYS handler
 	let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -166,7 +167,7 @@ pub unsafe fn init_sud() {
 		"Failed to set up SIGSYS handler: {}",
 		std::io::Error::last_os_error()
 	);
-	eprintln!("sud: SIGSYS handler registered successfully");
+	info!("sud: SIGSYS handler registered successfully");
 
 	// Verify the handler is properly registered
 	let mut oldact: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -182,9 +183,9 @@ pub unsafe fn init_sud() {
 		"SIGSYS handler mismatch: expected {:p}, got 0x{:x}",
 		handle_sigsys as *mut c_void, oldact.sa_sigaction
 	);
-	eprintln!("sud: SIGSYS handler verified");
+	info!("sud: SIGSYS handler verified");
 
-	eprintln!("sud: Initialization completed successfully");
+	info!("sud: Initialization completed successfully");
 }
 
 // Enable SUD by setting the PR_SET_SYSCALL_USER_DISPATCH prctl
@@ -195,17 +196,17 @@ pub fn print_sud_stats() {
 	let vdso_calls = VDSO_SYSCALLS.load(Ordering::Relaxed);
 	let rewritten = REWRITTEN_SYSCALLS.load(Ordering::Relaxed);
 
-	eprintln!("SUD Statistics:");
-	eprintln!("  Total syscall interceptions: {interceptions}");
-	eprintln!("  VDSO syscalls (not rewritten): {vdso_calls}");
-	eprintln!("  Rewritten syscalls: {rewritten}");
+	info!("SUD Statistics:");
+	info!("  Total syscall interceptions: {interceptions}");
+	info!("  VDSO syscalls (not rewritten): {vdso_calls}");
+	info!("  Rewritten syscalls: {rewritten}");
 
 	if interceptions > 0 {
 		let vdso_percent = (vdso_calls as f64 / interceptions as f64) * 100.0;
 		let rewritten_percent = (rewritten as f64 / interceptions as f64) * 100.0;
 
-		eprintln!("  VDSO syscalls: {vdso_percent:.2}%");
-		eprintln!("  Rewritten syscalls: {rewritten_percent:.2}%");
+		info!("  VDSO syscalls: {vdso_percent:.2}%");
+		info!("  Rewritten syscalls: {rewritten_percent:.2}%");
 	}
 }
 
@@ -225,27 +226,27 @@ pub fn print_sud_stats() {
 ///
 /// This function is unsafe because it:
 /// - Changes how syscalls are handled process-wide
-/// - Relies on correctly initialized GSRelData and SUD
+/// - Relies on correctly initialized `GSRelData` and SUD
 /// - Must have a valid SIGSYS handler set up
 pub unsafe fn enable_sud() {
-	eprintln!("sud: Enabling Syscall User Dispatch...");
+	info!("sud: Enabling Syscall User Dispatch...");
 
 	// Get the GS base address. This should have been set up by init_sud.
 	let gs_base = unsafe { get_gs_base() };
-	eprintln!("sud: GS base address: 0x{gs_base:x}");
+	info!("sud: GS base address: 0x{gs_base:x}");
 
 	// Calculate address of the SUD selector
 	let selector_addr = gs_base + SUD_SELECTOR_OFFSET as u64;
-	eprintln!("sud: SUD selector address: 0x{selector_addr:x}");
+	info!("sud: SUD selector address: 0x{selector_addr:x}");
 
 	// Verify the selector address is accessible
 	let selector = unsafe { *(selector_addr as *const u8) };
-	eprintln!("sud: Current selector value: {selector}");
+	info!("sud: Current selector value: {selector}");
 
 	// Enable SUD
 	match set_syscall_user_dispatch(PR_SYS_DISPATCH_ON, selector_addr as *const u8) {
 		Ok(()) => {
-			eprintln!("sud: SUD enabled successfully");
+			info!("sud: SUD enabled successfully");
 
 			// Register atexit handler to print statistics on program exit
 			extern "C" fn print_stats_at_exit() {
@@ -258,10 +259,13 @@ pub unsafe fn enable_sud() {
 		},
 		Err(e) => {
 			if e.raw_os_error() == Some(libc::EPERM) {
+				error!("Failed to enable SUD: Permission denied. Are you running with CAP_SYS_ADMIN or as root?");
 				panic!("Failed to enable SUD: Permission denied. Are you running with CAP_SYS_ADMIN or as root?");
 			} else if e.raw_os_error() == Some(libc::ENOSYS) {
+				error!("Failed to enable SUD: System call not implemented. Is your kernel version >= 5.11?");
 				panic!("Failed to enable SUD: System call not implemented. Is your kernel version >= 5.11?");
 			} else {
+				error!("Failed to enable SUD: {e}");
 				panic!("Failed to enable SUD: {e}");
 			}
 		},
@@ -352,7 +356,7 @@ static VDSO_LOCATION: once_cell::sync::Lazy<VdsoLocation> = once_cell::sync::Laz
 		// Calculate full size (offset from start of VDSO)
 		let vdso_size = max_addr - vdso_addr as usize;
 
-		eprintln!("sud: VDSO location: {vdso_addr:p}, size: 0x{vdso_size:x} (parsed from ELF headers)");
+		debug!("sud: VDSO location: {vdso_addr:p}, size: 0x{vdso_size:x} (parsed from ELF headers)");
 
 		VdsoLocation {
 			start: vdso_addr,

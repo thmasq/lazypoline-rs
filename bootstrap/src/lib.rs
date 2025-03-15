@@ -7,6 +7,9 @@
 use std::env;
 use std::ffi::{CString, c_void};
 use std::process;
+use std::sync::Once;
+use tracing::{debug, error};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 unsafe extern "C" {
 	fn dlmopen(lmid: libc::Lmid_t, filename: *const libc::c_char, flag: libc::c_int) -> *mut c_void;
@@ -14,12 +17,34 @@ unsafe extern "C" {
 	fn dlerror() -> *mut libc::c_char;
 }
 
+static INIT_LOGGER: Once = Once::new();
+
+fn init_logger() {
+	INIT_LOGGER.call_once(|| {
+		let filter = EnvFilter::try_from_default_env()
+			.or_else(|_| {
+				if std::env::var("LAZYPOLINE_DEBUG").is_ok() {
+					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline_rs=debug"))
+				} else {
+					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline_rs=warn"))
+				}
+			})
+			.unwrap();
+
+		tracing_subscriber::registry()
+			.with(fmt::layer().with_target(false))
+			.with(filter)
+			.init();
+	});
+}
+
 #[unsafe(link_section = ".init_array")]
 #[used]
 static CONSTRUCTOR: fn() = load_runtime;
 
 fn load_runtime() {
-	eprintln!("Bootstrap: Loading lazypoline runtime...");
+	init_logger();
+	debug!("Loading lazypoline runtime...");
 
 	unsafe {
 		let result = libc::mmap(
@@ -32,10 +57,10 @@ fn load_runtime() {
 		);
 
 		if result == libc::MAP_FAILED {
-			eprintln!("Bootstrap: WARNING! Could not map zero page. Is /proc/sys/vm/mmap_min_addr set to 0?");
-			eprintln!("Bootstrap: Error: {}", std::io::Error::last_os_error());
+			error!("WARNING! Could not map zero page. Is /proc/sys/vm/mmap_min_addr set to 0?");
+			error!("Error: {}", std::io::Error::last_os_error());
 		} else {
-			eprintln!("Bootstrap: Zero page mapped successfully");
+			debug!("Zero page mapped successfully");
 			libc::munmap(result, 0x1000);
 		}
 	}
@@ -43,14 +68,14 @@ fn load_runtime() {
 	let library_path = match env::var("LIBLAZYPOLINE") {
 		Ok(path) => path,
 		Err(_) => {
-			eprintln!(
-				"Bootstrap: 'LIBLAZYPOLINE' not specified: Please set the 'LIBLAZYPOLINE' env var to the path of the lazypoline runtime library"
+			error!(
+				"'LIBLAZYPOLINE' not specified: Please set the 'LIBLAZYPOLINE' env var to the path of the lazypoline runtime library"
 			);
 			process::exit(1);
 		},
 	};
 
-	eprintln!("Bootstrap: Loading library from: {}", library_path);
+	debug!("Loading library from: {}", library_path);
 
 	unsafe {
 		dlerror();
@@ -66,9 +91,9 @@ fn load_runtime() {
 			let error = dlerror();
 			if !error.is_null() {
 				let error_str = std::ffi::CStr::from_ptr(error).to_string_lossy();
-				eprintln!("Failed to open lazypoline library: {}", error_str);
+				error!("Failed to open lazypoline library: {}", error_str);
 			} else {
-				eprintln!("Failed to open lazypoline library with unknown error");
+				error!("Failed to open lazypoline library with unknown error");
 			}
 			process::exit(1);
 		}
@@ -80,18 +105,18 @@ fn load_runtime() {
 			let error = dlerror();
 			if !error.is_null() {
 				let error_str = std::ffi::CStr::from_ptr(error).to_string_lossy();
-				eprintln!("Failed to find init_lazypoline: {}", error_str);
+				error!("Failed to find init_lazypoline: {}", error_str);
 			} else {
-				eprintln!("Failed to find init_lazypoline with unknown error");
+				error!("Failed to find init_lazypoline with unknown error");
 			}
 			process::exit(1);
 		}
 
-		eprintln!("Bootstrap: Found init_lazypoline function at {:p}", init_fn_ptr);
+		debug!("Found init_lazypoline function at {:p}", init_fn_ptr);
 
 		let init_fn: extern "C" fn() = std::mem::transmute(init_fn_ptr);
-		eprintln!("Bootstrap: Calling init_lazypoline...");
+		debug!("Calling init_lazypoline...");
 		init_fn();
-		eprintln!("Bootstrap: init_lazypoline completed");
+		debug!("init_lazypoline completed");
 	}
 }

@@ -13,12 +13,12 @@
 //!
 //! Note: You need to have `/proc/sys/vm/mmap_min_addr` set to 0 for this to work.
 
-#![allow(unused_unsafe)]
 #![allow(non_upper_case_globals)]
 
 pub mod ffi;
 pub mod gsrel;
 pub mod lazypoline;
+pub mod logging;
 pub mod signal;
 pub mod sud;
 pub mod thread_setup;

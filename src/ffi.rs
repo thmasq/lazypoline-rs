@@ -2,6 +2,7 @@ use libc::{c_int, c_long, sigset_t, size_t};
 use std::arch::asm;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{debug, error};
 
 pub const SYSCALL_DISPATCH_FILTER_ALLOW: u8 = 0;
 pub const SYSCALL_DISPATCH_FILTER_BLOCK: u8 = 1;
@@ -40,7 +41,8 @@ impl SigSysInfo {
 }
 
 #[inline(always)]
-#[must_use] pub unsafe fn syscall6(
+#[must_use]
+pub unsafe fn syscall6(
 	num: c_long,
 	arg1: c_long,
 	arg2: c_long,
@@ -73,13 +75,14 @@ pub struct SpinLock {
 }
 
 impl Default for SpinLock {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl SpinLock {
-	#[must_use] pub const fn new() -> Self {
+	#[must_use]
+	pub const fn new() -> Self {
 		Self {
 			lock: AtomicBool::new(false),
 		}
@@ -154,7 +157,8 @@ pub unsafe fn mprotect_raw(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
 }
 
 #[inline]
-#[must_use] pub unsafe fn get_gs_base() -> u64 {
+#[must_use]
+pub unsafe fn get_gs_base() -> u64 {
 	let mut value: u64 = 0;
 	unsafe {
 		let result = syscall6(
@@ -172,7 +176,8 @@ pub unsafe fn mprotect_raw(addr: *mut c_void, len: size_t, prot: c_int) -> c_int
 }
 
 #[inline]
-#[must_use] pub unsafe fn set_gs_base(value: u64) -> c_int {
+#[must_use]
+pub unsafe fn set_gs_base(value: u64) -> c_int {
 	unsafe {
 		syscall6(
 			libc::SYS_arch_prctl as c_long,
@@ -222,12 +227,14 @@ pub unsafe fn rt_sigprocmask_raw(how: c_int, set: *const sigset_t, oldset: *mut 
 }
 
 #[inline]
-#[must_use] pub const fn align_down(addr: usize, align: usize) -> usize {
+#[must_use]
+pub const fn align_down(addr: usize, align: usize) -> usize {
 	addr & !(align - 1)
 }
 
 #[inline]
-#[must_use] pub const fn align_up(addr: usize, align: usize) -> usize {
+#[must_use]
+pub const fn align_up(addr: usize, align: usize) -> usize {
 	(addr + align - 1) & !(align - 1)
 }
 
@@ -246,7 +253,7 @@ pub struct SyscallArgs {
 pub struct PageAligned<T>(pub T);
 
 pub fn set_syscall_user_dispatch(action: c_int, selector_ptr: *const u8) -> Result<(), std::io::Error> {
-	eprintln!(
+	debug!(
 		"FFI: Calling prctl with PR_SET_SYSCALL_USER_DISPATCH ({PR_SET_SYSCALL_USER_DISPATCH}), action {action}, selector_ptr {selector_ptr:p}"
 	);
 
@@ -263,11 +270,11 @@ pub fn set_syscall_user_dispatch(action: c_int, selector_ptr: *const u8) -> Resu
 	};
 
 	if result == 0 {
-		eprintln!("FFI: prctl succeeded!");
+		debug!("FFI: prctl succeeded!");
 		Ok(())
 	} else {
 		let err = std::io::Error::from_raw_os_error(-result as i32);
-		eprintln!("FFI: prctl failed with error: {} ({})", err, -result);
+		error!("FFI: prctl failed with error: {} ({})", err, -result);
 		Err(err)
 	}
 }

@@ -8,7 +8,7 @@ const CLONE_SIGHAND: u64 = 0x00000800;
 /// Sets up the per-thread data structures for a newly created thread.
 ///
 /// This function is called during thread creation (via clone) to:
-/// 1. Initialize thread-local GSRelData
+/// 1. Initialize thread-local `GSRelData`
 /// 2. Set the initial privilege level
 /// 3. Set up signal handlers for the new thread
 /// 4. Enable SUD for the new thread
@@ -24,7 +24,7 @@ const CLONE_SIGHAND: u64 = 0x00000800;
 /// - Accesses raw pointers and shared memory
 /// - Modifies thread-local and potentially shared state
 /// - Must only be called during thread creation
-/// - Relies on correctly initialized GSRelData
+/// - Relies on correctly initialized `GSRelData`
 #[unsafe(no_mangle)]
 pub extern "C" fn setup_new_thread(clone_flags: u64) {
 	unsafe {

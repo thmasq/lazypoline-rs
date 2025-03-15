@@ -84,7 +84,7 @@ impl GSRelData {
 /// # Safety
 ///
 /// This function is safe but relies on properly initialized GS register
-/// and GSRelData structure.
+/// and `GSRelData` structure.
 #[inline(always)]
 #[must_use]
 pub fn get_privilege_level() -> u8 {
@@ -103,8 +103,8 @@ pub fn get_privilege_level() -> u8 {
 
 /// Sets the SUD privilege level in thread-local storage.
 ///
-/// Setting the privilege level to SYSCALL_DISPATCH_FILTER_ALLOW (0) allows
-/// syscalls to execute normally. Setting it to SYSCALL_DISPATCH_FILTER_BLOCK (1)
+/// Setting the privilege level to `SYSCALL_DISPATCH_FILTER_ALLOW` (0) allows
+/// syscalls to execute normally. Setting it to `SYSCALL_DISPATCH_FILTER_BLOCK` (1)
 /// causes syscalls to trigger SIGSYS.
 ///
 /// # Parameters
@@ -114,7 +114,7 @@ pub fn get_privilege_level() -> u8 {
 /// # Safety
 ///
 /// This function is safe but relies on properly initialized GS register
-/// and GSRelData structure.
+/// and `GSRelData` structure.
 #[inline(always)]
 pub fn set_privilege_level(level: u8) {
 	unsafe {

@@ -3,6 +3,7 @@ use libc::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRI
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::slice;
+use tracing::{debug, error, trace};
 
 unsafe extern "C" {
 	pub fn asm_syscall_hook();
@@ -22,9 +23,9 @@ const COMPAT_NONDEP_APP: bool = false;
 /// Initializes the zpoline mechanism for efficient syscall interposition.
 ///
 /// This function:
-/// 1. Maps the zero page in memory (requires mmap_min_addr=0)
+/// 1. Maps the zero page in memory (requires `mmap_min_addr=0`)
 /// 2. Sets up syscall trampolines in the zero page
-/// 3. Creates a jump to the asm_syscall_hook function
+/// 3. Creates a jump to the `asm_syscall_hook` function
 /// 4. Makes the zero page executable
 ///
 /// The zpoline mechanism works by rewriting syscall instructions to
@@ -42,8 +43,8 @@ const COMPAT_NONDEP_APP: bool = false;
 /// - Modifies global process state
 /// - Must be called before any syscalls are intercepted
 pub unsafe fn init_zpoline() -> Result<(), &'static str> {
-	eprintln!("zpoline: Initializing zpoline mechanism...");
-	eprintln!("zpoline: Attempting to map zero page...");
+	debug!("zpoline: Initializing zpoline mechanism...");
+	debug!("zpoline: Attempting to map zero page...");
 
 	let zeropage = unsafe {
 		mmap_at_addr(
@@ -57,21 +58,21 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	};
 
 	if zeropage == libc::MAP_FAILED.cast::<c_void>() {
-		eprintln!(
+		error!(
 			"zpoline: Error: Failed to map zero page with MAP_FIXED: {}",
 			std::io::Error::last_os_error()
 		);
-		eprintln!("zpoline: Please ensure /proc/sys/vm/mmap_min_addr is set to 0");
+		error!("zpoline: Please ensure /proc/sys/vm/mmap_min_addr is set to 0");
 		return Err("Failed to map zero page");
 	}
 
-	eprintln!("zpoline: Zero page mapped successfully at address {zeropage:p}");
+	debug!("zpoline: Zero page mapped successfully at address {zeropage:p}");
 
 	const NUM_SYSCALLS: usize = 512;
 
 	let zeropage_slice = unsafe { slice::from_raw_parts_mut(zeropage.cast::<u8>(), 0x1000) };
 
-	eprintln!("zpoline: Setting up syscall trampolines...");
+	debug!("zpoline: Setting up syscall trampolines...");
 
 	for i in 0..NUM_SYSCALLS {
 		assert_eq!(NUM_SYSCALLS, 512);
@@ -92,7 +93,7 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 		}
 	}
 
-	eprintln!("zpoline: Setting up trampoline to asm_syscall_hook...");
+	debug!("zpoline: Setting up trampoline to asm_syscall_hook...");
 
 	// Set up trampoline code to jump to asm_syscall_hook
 	// Code sequence:
@@ -109,7 +110,7 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 
 	// 64-bit address of asm_syscall_hook, byte by byte
 	let hook_addr = asm_syscall_hook as usize;
-	eprintln!("zpoline: asm_syscall_hook at address 0x{hook_addr:x}");
+	debug!("zpoline: asm_syscall_hook at address 0x{hook_addr:x}");
 
 	zeropage_slice[NUM_SYSCALLS + 0x3] = hook_addr as u8;
 	zeropage_slice[NUM_SYSCALLS + 0x4] = (hook_addr >> 8) as u8;
@@ -124,26 +125,26 @@ pub unsafe fn init_zpoline() -> Result<(), &'static str> {
 	zeropage_slice[NUM_SYSCALLS + 0xb] = 0xff;
 	zeropage_slice[NUM_SYSCALLS + 0xc] = 0xe0;
 
-	eprintln!("zpoline: Making zero page executable...");
+	debug!("zpoline: Making zero page executable...");
 
 	// Make the page executable (also read-only)
 	// PROT_EXEC alone gives XOM (execute-only memory)
 	let result = unsafe { mprotect_raw(zeropage, 0x1000, PROT_READ | PROT_EXEC) };
 	if result != 0 {
-		eprintln!(
+		error!(
 			"zpoline: Error: Failed to mark zero page as executable: {}",
 			std::io::Error::last_os_error()
 		);
 		return Err("Failed to mark zero page as executable");
 	}
 
-	eprintln!("zpoline: Initialization completed successfully");
+	debug!("zpoline: Initialization completed successfully");
 	Ok(())
 }
 
 /// Handles a syscall that was redirected via the zpoline mechanism.
 ///
-/// This function is called from the assembly hook (asm_syscall_hook) when
+/// This function is called from the assembly hook (`asm_syscall_hook`) when
 /// a rewritten syscall instruction is executed. It forwards the syscall
 /// to `syscall_emulate` for actual handling.
 ///
@@ -178,7 +179,7 @@ pub extern "C" fn zpoline_syscall_handler(
 	should_emulate: *mut u64,
 ) -> i64 {
 	let _ = rip_after_syscall;
-	unsafe { crate::lazypoline::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate) }
+	crate::lazypoline::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate)
 }
 
 /// Rewrites a syscall instruction to use the zpoline mechanism.
@@ -205,14 +206,14 @@ pub extern "C" fn zpoline_syscall_handler(
 /// - Must be called with a valid syscall instruction address
 /// - Must be synchronized with execution (instruction must not be executing)
 pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
-	eprintln!("zpoline: Rewriting syscall at address {syscall_addr:p}");
+	debug!("zpoline: Rewriting syscall at address {syscall_addr:p}");
 
 	let syscall_page = align_down(syscall_addr as usize, 0x1000) as *mut c_void;
 
 	let _guard = SpinLockGuard::new(&REWRITE_LOCK);
 
 	if unsafe { *syscall_addr } == 0xD0FF {
-		eprintln!("zpoline: Syscall already rewritten, skipping");
+		debug!("zpoline: Syscall already rewritten, skipping");
 		return;
 	}
 
@@ -221,18 +222,18 @@ pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 		perms |= PROT_READ;
 	}
 
-	eprintln!("zpoline: Setting page permissions to allow writing");
+	debug!("zpoline: Setting page permissions to allow writing");
 
 	let result = unsafe { mprotect_raw(syscall_page, 0x1000, perms) };
 	if result != 0 {
-		eprintln!(
+		error!(
 			"zpoline: Error: Failed to make syscall page writable: {}",
 			std::io::Error::last_os_error()
 		);
 		panic!("Failed to make syscall page writable");
 	}
 
-	eprintln!(
+	trace!(
 		"zpoline: Original instruction at {:p}: 0x{:04x}",
 		syscall_addr,
 		unsafe { *syscall_addr }
@@ -241,14 +242,14 @@ pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 	// Rewrite syscall (0x0F05) to call-near [rax+0] (0xD0FF)
 	unsafe { *syscall_addr = 0xD0FF };
 
-	eprintln!("zpoline: Instruction rewritten to 0xD0FF (call-near [rax+0])");
+	debug!("zpoline: Instruction rewritten to 0xD0FF (call-near [rax+0])");
 
 	// Restore original permissions if not in compatibility mode
 	if !COMPAT_NONDEP_APP {
-		eprintln!("zpoline: Restoring page permissions");
+		debug!("zpoline: Restoring page permissions");
 		let result = unsafe { mprotect_raw(syscall_page, 0x1000, PROT_READ | PROT_EXEC) };
 		if result != 0 {
-			eprintln!(
+			error!(
 				"zpoline: Error: Failed to restore syscall page permissions: {}",
 				std::io::Error::last_os_error()
 			);

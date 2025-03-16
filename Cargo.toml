@@ -12,18 +12,18 @@ name = "lazypoline_rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+lazy_static = "1.4"
 lazypoline-macros = { version = "0.2.0", path = "./lazypoline-macros" }
 libc = { version = "0.2", features = ["extra_traits"] }
 nix = "0.29"
 once_cell = "1.21"
+thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "1.0"
-lazy_static = "1.4"
 
 [dev-dependencies]
-tempfile = "3.10"
 anyhow = "1.0"
+tempfile = "3.10"
 
 [build-dependencies]
 cc = "1.2"

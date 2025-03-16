@@ -1,49 +1,69 @@
-//! Lazypoline - A fast, exhaustive, and expressive syscall interposer for user-space Linux applications.
+//! lazypoline-rs - A framework for building syscall interposers
 //!
-//! This library implements a syscall interposition mechanism using Syscall User Dispatch (SUD)
-//! and binary rewriting for exhaustive syscall interception with maximum efficiency.
+//! This framework provides tools for intercepting and handling system calls
+//! in user-space Linux applications using Syscall User Dispatch (SUD)
+//! and binary rewriting for maximum efficiency.
 //!
-//! # Usage
+//! # Getting Started
 //!
-//! Build this library as a cdylib and load it using `LD_PRELOAD`:
+//! ```rust
+//! use lazypoline::{self, syscall, SyscallContext, SyscallAction};
 //!
-//! ```bash
-//! LIBLAZYPOLINE="path/to/liblazypoline.so" LD_PRELOAD="path/to/libbootstrap.so" your_application
+//! #[lazypoline::syscall_handler]
+//! fn handle_open(ctx: &mut SyscallContext) -> SyscallAction {
+//!     println!("Open syscall: {}", unsafe { std::ffi::CStr::from_ptr(ctx.args.rdi as *const i8).to_string_lossy() });
+//!     SyscallAction::Allow
+//! }
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Initialize the interposer
+//!     let interposer = lazypoline::new()
+//!         .handler(handle_open())
+//!         .trace(true)
+//!         .build()?
+//!         .init()?;
+//!
+//!     // Your application code here
+//!     
+//!     // The interposer is automatically cleaned up when dropped
+//!     Ok(())
+//! }
 //! ```
-//!
-//! Note: You need to have `/proc/sys/vm/mmap_min_addr` set to 0 for this to work.
 
-#![allow(non_upper_case_globals)]
-
+pub mod core;
 pub mod ffi;
-pub mod gsrel;
-pub mod lazypoline;
-pub mod logging;
-pub mod signal;
-pub mod sud;
-pub mod thread_setup;
-pub mod zpoline;
+pub mod interposer;
+pub mod syscall;
+pub mod util;
 
-#[cfg(target_arch = "x86_64")]
-mod asm;
+pub use lazypoline_macros::{syscall_enum, syscall_handler};
 
-pub use lazypoline::init_lazypoline;
-pub use lazypoline::syscall_emulate;
+pub use crate::interposer::SyscallHandler;
+pub use interposer::{Interposer, InterposerBuilder, InterposerError};
+pub use syscall::{Syscall, SyscallAction, SyscallArgs, SyscallContext};
 
-#[unsafe(no_mangle)]
-pub extern "C" fn bootstrap_lazypoline() {
-	lazypoline::init_lazypoline();
+/// Create a new interposer builder
+#[must_use] pub fn new() -> InterposerBuilder {
+	InterposerBuilder::new()
 }
 
-#[cfg(test)]
-mod tests {
-	#[allow(unused_imports)]
-	use super::*;
+/// Initialize lazypoline with default settings
+///
+/// This is equivalent to `new().build().init()`
+pub fn init() -> Result<Interposer, InterposerError> {
+	new().build()?.init()
+}
 
-	#[test]
-	const fn test_initialization() {
-		// This test is more of a placeholder - actual testing would involve
-		// running a real program with lazypoline loaded
-		// Real testing is done with the executable in the C++ version
+/// Shorthand for setting up a simple syscall tracer
+pub fn trace() -> Result<Interposer, InterposerError> {
+	new().trace(true).build()?.init()
+}
+
+// Export for FFI (used by bootstrap)
+#[unsafe(no_mangle)]
+pub extern "C" fn bootstrap_lazypoline() {
+	if let Err(e) = init() {
+		eprintln!("Failed to initialize lazypoline: {e}");
+		std::process::exit(1);
 	}
 }

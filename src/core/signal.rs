@@ -1,17 +1,26 @@
+//! Signal handling for lazypoline
+//!
+//! This module implements signal handling for lazypoline, particularly
+//! for handling the SIGSYS signal used by Syscall User Dispatch (SUD).
+
+use crate::core::gsrel::{BlockScope, get_privilege_level, set_privilege_level};
 use crate::ffi::{SpinLock, SpinLockGuard, rt_sigaction_raw};
-use crate::gsrel::{BlockScope, get_privilege_level, set_privilege_level};
 use libc::{SA_SIGINFO, SIG_DFL, SIG_IGN, SIGSYS, c_int, c_void, sigaction, siginfo_t, sigset_t, ucontext_t};
 use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
 use std::ptr::null;
 
-/// Flag indicating that a signal is not supported.
+/// Flag indicating that a signal is not supported
 const SA_UNSUPPORTED: i32 = 0x0000_0400;
 
-/// Represents a kernel-level signal action structure.
+/// The maximum number of signals supported by the system
+const NSIG: usize = 64;
+
+/// Represents a kernel-level signal action structure
 ///
-/// This structure maps directly to the kernel's internal representation of signal handlers,
-/// which differs slightly from the user-space `sigaction` structure exposed by libc.
+/// This structure maps directly to the kernel's internal representation
+/// of signal handlers, which differs slightly from the user-space
+/// `sigaction` structure exposed by libc.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KernelSigaction {
@@ -28,10 +37,7 @@ pub struct KernelSigaction {
 	pub mask: sigset_t,
 }
 
-/// The maximum number of signals supported by the system.
-const NSIG: usize = 64;
-
-/// Represents the different types of default signal dispositions.
+/// Represents the different types of default signal dispositions
 ///
 /// This enum categorizes signals by their default behavior when no handler
 /// is registered or when `SIG_DFL` is used as the handler.
@@ -49,8 +55,7 @@ pub enum SigDispType {
 	Cont,
 }
 
-/// Manages signal handlers for a process, providing a layer of abstraction
-/// over the Linux signal handling mechanism.
+/// Manages signal handlers for a process
 ///
 /// This structure maintains a table of application-specific signal handlers
 /// and allows for intercepting and wrapping signals while maintaining the
@@ -68,24 +73,17 @@ pub struct SignalHandlers {
 // SignalHandlers can be shared across threads safely
 unsafe impl Sync for SignalHandlers {}
 
-// External assembly functions used for signal and syscall handling.
+// External assembly functions used for signal and syscall handling
 unsafe extern "C" {
-	/// Assembly function that hooks into syscalls for interception.
-	///
-	/// This function is the entry point for syscall interception and
-	/// is installed by the syscall user dispatch mechanism.
+	/// Assembly function that hooks into syscalls for interception
 	pub fn asm_syscall_hook();
 
 	/// Assembly trampoline function used to restore the original selector state
-	/// after signal handling is complete.
-	///
-	/// This function is inserted into the execution path after a signal handler
-	/// returns to restore the syscall blocking state that was active before the
-	/// signal occurred.
+	/// after signal handling is complete
 	pub fn restore_selector_trampoline();
 }
 
-/// Wraps an application's signal handler to manage privilege levels during signal handling.
+/// Wraps an application's signal handler to manage privilege levels during signal handling
 ///
 /// This function:
 /// 1. Preserves the current privilege level at signal entry
@@ -93,18 +91,6 @@ unsafe extern "C" {
 /// 3. Invokes the application's handler
 /// 4. Sets up a return trampoline to restore the original privilege level
 /// 5. Blocks syscalls until the trampoline executes
-///
-/// # Safety
-///
-/// This function is unsafe because it:
-/// - Directly manipulates processor state
-/// - Modifies the signal context and return behavior
-/// - Assumes the gsrel data structure is properly initialized
-///
-/// # Panics
-///
-/// Panics if the stack pointer (RSP) is modified by the application's signal handler,
-/// which would break the trampoline setup.
 unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, context: *mut c_void) {
 	let selector_on_signal_entry = get_privilege_level();
 
@@ -114,7 +100,7 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
 	let rsp = unsafe { *gregs.add(libc::REG_RSP as usize) };
 
-	let gsreldata = crate::gsrel::GSRelData::new();
+	let gsreldata = unsafe { crate::core::gsrel::GSRelData::new() };
 	let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
 
 	unsafe { (*signal_handlers).invoke_app_specific_handler(signo, info, context) };
@@ -140,28 +126,20 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 }
 
 impl SignalHandlers {
-	/// Creates a new `SignalHandlers` instance.
-	///
-	/// This function:
-	/// 1. Allocates memory for the `SignalHandlers` structure
-	/// 2. Initializes the default handler and handler table
-	/// 3. Queries the current signal handlers for all signals (except SIGKILL)
-	/// 4. Saves them in the internal state
+	/// Creates a new `SignalHandlers` instance
 	///
 	/// # Returns
 	///
-	/// A pointer to the newly allocated `SignalHandlers` instance.
-	///
-	/// # Panics
-	///
-	/// Panics if memory allocation fails.
+	/// A pointer to the newly allocated `SignalHandlers` instance
 	///
 	/// # Safety
 	///
-	/// This function returns a raw pointer that must be properly managed by the caller.
-	/// The caller is responsible for eventually freeing this memory to avoid leaks.
+	/// This function is unsafe because it:
+	/// - Allocates memory with malloc
+	/// - Sets up signal handlers
+	/// - Modifies global process state
 	#[must_use]
-	pub fn new() -> *mut Self {
+	pub unsafe fn new() -> *mut Self {
 		unsafe {
 			let handlers = libc::malloc(std::mem::size_of::<Self>()).cast::<Self>();
 			assert!(!handlers.is_null(), "Failed to allocate SignalHandlers");
@@ -234,7 +212,7 @@ impl SignalHandlers {
 		}
 	}
 
-	/// Invokes the application-specific handler for a given signal.
+	/// Invokes the application-specific handler for a given signal
 	///
 	/// # Arguments
 	///
@@ -248,11 +226,6 @@ impl SignalHandlers {
 	/// - Dereferences raw pointers
 	/// - Calls an arbitrary function pointer provided by the application
 	/// - Assumes the signal handlers table is properly initialized
-	///
-	/// # Panics
-	///
-	/// Panics if the handler is `SIG_DFL` or `SIG_IGN`, as these should be handled
-	/// at a different level.
 	pub unsafe fn invoke_app_specific_handler(&self, sig: c_int, info: *mut siginfo_t, context: *mut c_void) {
 		let _guard = SpinLockGuard::new(&self.lock);
 		let app_handler = unsafe { self.get_app_handler(sig as usize) };
@@ -274,7 +247,7 @@ impl SignalHandlers {
 		}
 	}
 
-	/// Handles signal action (sigaction) requests from the application.
+	/// Handles signal action (sigaction) requests from the application
 	///
 	/// This function intercepts the application's attempts to register signal handlers
 	/// and maintains internal state while setting up the actual kernel signal handler
@@ -288,7 +261,7 @@ impl SignalHandlers {
 	///
 	/// # Returns
 	///
-	/// 0 on success, or a negative error code on failure.
+	/// 0 on success, or a negative error code on failure
 	///
 	/// # Safety
 	///
@@ -296,11 +269,6 @@ impl SignalHandlers {
 	/// - Dereferences raw pointers
 	/// - Modifies signal handling state that affects the entire process
 	/// - Uses low-level system calls
-	///
-	/// # Notes
-	///
-	/// Special handling is applied to SIGSYS signals, which are always ignored at the
-	/// application level since they are used internally by the syscall user dispatch mechanism.
 	pub unsafe fn handle_app_sigaction(&self, signo: c_int, newact: *const sigaction, oldact: *mut sigaction) -> i64 {
 		// Hold lock while operating on app_handlers
 		let _guard = SpinLockGuard::new(&self.lock);
@@ -447,7 +415,7 @@ impl SignalHandlers {
 		0
 	}
 
-	/// Retrieves the application-specific handler for a given signal.
+	/// Retrieves the application-specific handler for a given signal
 	///
 	/// # Arguments
 	///
@@ -455,17 +423,17 @@ impl SignalHandlers {
 	///
 	/// # Returns
 	///
-	/// The application's registered handler for the specified signal.
+	/// The application's registered handler for the specified signal
 	///
 	/// # Safety
 	///
 	/// This function is unsafe because it dereferences the internal `UnsafeCell`
-	/// without synchronization (caller must ensure exclusive access or use the lock).
+	/// without synchronization (caller must ensure exclusive access or use the lock)
 	unsafe fn get_app_handler(&self, signo: usize) -> KernelSigaction {
 		unsafe { (*self.app_handlers.get())[signo] }
 	}
 
-	/// Converts an internal `KernelSigaction` to the user-facing sigaction structure.
+	/// Converts an internal `KernelSigaction` to the user-facing sigaction structure
 	///
 	/// # Arguments
 	///
@@ -473,12 +441,12 @@ impl SignalHandlers {
 	///
 	/// # Returns
 	///
-	/// A sigaction structure representing the current handler for the specified signal.
+	/// A sigaction structure representing the current handler for the specified signal
 	///
 	/// # Safety
 	///
 	/// This function is unsafe because it dereferences the internal `UnsafeCell`
-	/// without synchronization (caller must ensure exclusive access or use the lock).
+	/// without synchronization (caller must ensure exclusive access or use the lock)
 	unsafe fn get_kernel_sigaction(&self, signo: usize) -> sigaction {
 		let handler = unsafe { self.get_app_handler(signo) };
 
@@ -490,7 +458,7 @@ impl SignalHandlers {
 		act
 	}
 
-	/// Determines the default behavior for a given signal.
+	/// Determines the default behavior for a given signal
 	///
 	/// # Arguments
 	///
@@ -498,7 +466,7 @@ impl SignalHandlers {
 	///
 	/// # Returns
 	///
-	/// The default disposition type for the specified signal.
+	/// The default disposition type for the specified signal
 	const fn get_default_behavior(signo: c_int) -> SigDispType {
 		match signo {
 			// Ignored signals
@@ -541,7 +509,7 @@ impl SignalHandlers {
 		}
 	}
 
-	/// Determines if a signal would terminate the process by default.
+	/// Determines if a signal would terminate the process by default
 	///
 	/// # Arguments
 	///
@@ -550,7 +518,7 @@ impl SignalHandlers {
 	/// # Returns
 	///
 	/// `true` if the signal would terminate the process (with or without core dump),
-	/// `false` otherwise.
+	/// `false` otherwise
 	#[allow(dead_code)]
 	fn is_terminating_sig(signo: c_int) -> bool {
 		let behavior = Self::get_default_behavior(signo);

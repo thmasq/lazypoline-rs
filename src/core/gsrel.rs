@@ -1,43 +1,87 @@
+//! GS register-related memory and data structures
+//!
+//! This module implements the GS register-related functionality
+//! used for thread-local storage in lazypoline. The GS register
+//! is used to store thread-local state for syscall interposition.
+
+use crate::core::signal::SignalHandlers;
 use crate::ffi::{PageAligned, SYSCALL_DISPATCH_FILTER_BLOCK, mmap_at_addr, set_gs_base};
-use crate::signal::SignalHandlers;
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 
+/// Offset of the SUD selector in the `GSRelData` structure
 pub const SUD_SELECTOR_OFFSET: usize = 0;
-pub const SIGRETURN_STACK_SP_OFFSET: usize = 16;
-pub const RIP_AFTER_SYSCALL_STACK_SP_OFFSET: usize = 4120;
-pub const XSAVE_AREA_STACK_SP_OFFSET: usize = 8256;
-pub const XSAVE_EAX: u32 = 0b111; // saves x87 state, XMM & YMM vector registers
-pub const XSAVE_SIZE: usize = 768; // aligned to 64-byte boundary
 
+/// Offset of the sigreturn stack in the `GSRelData` structure
+pub const SIGRETURN_STACK_SP_OFFSET: usize = 16;
+
+/// Offset of the RIP after syscall stack in the `GSRelData` structure
+pub const RIP_AFTER_SYSCALL_STACK_SP_OFFSET: usize = 4120;
+
+/// Offset of the XSAVE area stack in the `GSRelData` structure
+pub const XSAVE_AREA_STACK_SP_OFFSET: usize = 8256;
+
+/// Flags for XSAVE register saving
+pub const XSAVE_EAX: u32 = 0b111; // saves x87 state, XMM & YMM vector registers
+
+/// Size of the XSAVE area, aligned to 64-byte boundary
+pub const XSAVE_SIZE: usize = 768;
+
+/// Thread-local data structure accessed via the GS register
+///
+/// This structure contains thread-local state needed for syscall
+/// interposition, including the SUD selector, signal handlers,
+/// and stacks for saving register state.
 #[repr(C, align(4096))]
 pub struct GSRelData {
+	/// Selector for Syscall User Dispatch (0 = allow, 1 = block)
 	pub sud_selector: UnsafeCell<u8>,
 
-	_padding1: [u8; 7], // Padding to align signal_handlers to 8 bytes
+	/// Padding to align `signal_handlers` to 8 bytes
+	_padding1: [u8; 7],
 
+	/// Pointer to the signal handlers
 	pub signal_handlers: UnsafeCell<*mut SignalHandlers>,
 
+	/// Padding for alignment
 	_padding2: [u8; 8],
 
-	// Sigreturn stack structure (corresponds to the C++ nested structure)
+	/// Current pointer into the sigreturn stack
 	pub sigreturn_stack_current: UnsafeCell<*mut u8>,
+
+	/// Base of the sigreturn stack
 	pub sigreturn_stack_base: [u8; 0x1000],
 
-	// Stack of rip_after_syscall values for vfork handling
+	/// Current pointer into the RIP after syscall stack
 	pub rip_after_syscall_stack_current: UnsafeCell<*mut u8>,
+
+	/// Base of the RIP after syscall stack
 	pub rip_after_syscall_stack_base: [u8; 0x1000],
 
-	// XSAVE area stack grows up
+	/// Current pointer into the XSAVE area stack
 	pub xsave_area_stack_current: UnsafeCell<*mut u8>,
+
+	/// Base of the XSAVE area stack
 	pub xsave_area_stack_base: PageAligned<[u8; XSAVE_SIZE * 6]>,
 }
 
 impl GSRelData {
+	/// Creates a new `GSRelData` structure and sets the GS register to point to it
+	///
+	/// # Returns
+	///
+	/// A pointer to the newly allocated `GSRelData` structure
+	///
+	/// # Safety
+	///
+	/// This function is unsafe because it:
+	/// - Allocates memory with mmap
+	/// - Sets the GS register
+	/// - Modifies global processor state
 	#[must_use]
-	pub fn new() -> *mut Self {
+	pub unsafe fn new() -> *mut Self {
 		unsafe {
 			let mem = mmap_at_addr(
 				null_mut(),
@@ -80,12 +124,6 @@ impl GSRelData {
 /// # Returns
 ///
 /// The current privilege level (0 = allow, 1 = block)
-///
-/// # Safety
-///
-/// This function is safe but relies on properly initialized GS register
-/// and `GSRelData` structure.
-#[allow(clippy::inline_always)]
 #[inline(always)]
 #[must_use]
 pub fn get_privilege_level() -> u8 {
@@ -111,12 +149,6 @@ pub fn get_privilege_level() -> u8 {
 /// # Parameters
 ///
 /// * `level` - The privilege level to set (0 = allow, 1 = block)
-///
-/// # Safety
-///
-/// This function is safe but relies on properly initialized GS register
-/// and `GSRelData` structure.
-#[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn set_privilege_level(level: u8) {
 	unsafe {
@@ -129,6 +161,10 @@ pub fn set_privilege_level(level: u8) {
 	}
 }
 
+/// RAII guard for temporarily unblocking syscalls
+///
+/// This struct temporarily allows syscalls while it is in scope,
+/// and restores the previous privilege level when dropped.
 pub struct UnblockScope {
 	old_selector: u8,
 }
@@ -140,6 +176,9 @@ impl Default for UnblockScope {
 }
 
 impl UnblockScope {
+	/// Creates a new `UnblockScope`
+	///
+	/// This saves the current privilege level and sets it to allow syscalls.
 	#[must_use]
 	pub fn new() -> Self {
 		let old_selector = get_privilege_level();
@@ -155,6 +194,10 @@ impl Drop for UnblockScope {
 	}
 }
 
+/// RAII guard for temporarily blocking syscalls
+///
+/// This struct temporarily blocks syscalls while it is in scope,
+/// and restores the previous privilege level when dropped.
 pub struct BlockScope {
 	old_selector: u8,
 }
@@ -166,6 +209,9 @@ impl Default for BlockScope {
 }
 
 impl BlockScope {
+	/// Creates a new `BlockScope`
+	///
+	/// This saves the current privilege level and sets it to block syscalls.
 	#[must_use]
 	pub fn new() -> Self {
 		let old_selector = get_privilege_level();

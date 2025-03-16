@@ -1,3 +1,7 @@
+//! Build script for lazypoline
+//!
+//! This script compiles the assembly code for lazypoline.
+
 fn main() {
 	// Inform Cargo that if the assembly files change, it should rerun this build script
 	println!("cargo:rerun-if-changed=src/asm/asm_syscall_hook.s");

@@ -24,9 +24,9 @@ fn init_logger() {
 		let filter = EnvFilter::try_from_default_env()
 			.or_else(|_| {
 				if std::env::var("LAZYPOLINE_DEBUG").is_ok() {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline_rs=debug"))
+					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug"))
 				} else {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline_rs=warn"))
+					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn"))
 				}
 			})
 			.unwrap();
@@ -44,7 +44,6 @@ static CONSTRUCTOR: fn() = load_runtime;
 
 fn load_runtime() {
 	init_logger();
-	debug!("Loading lazypoline runtime...");
 
 	unsafe {
 		let result = libc::mmap(
@@ -98,25 +97,25 @@ fn load_runtime() {
 			process::exit(1);
 		}
 
-		let init_sym = CString::new("init_lazypoline").expect("CString conversion failed");
+		let init_sym = CString::new("bootstrap_lazypoline").expect("CString conversion failed");
 		let init_fn_ptr = dlsym(handle, init_sym.as_ptr());
 
 		if init_fn_ptr.is_null() {
 			let error = dlerror();
 			if !error.is_null() {
 				let error_str = std::ffi::CStr::from_ptr(error).to_string_lossy();
-				error!("Failed to find init_lazypoline: {}", error_str);
+				error!("Failed to find bootstrap_lazypoline: {}", error_str);
 			} else {
-				error!("Failed to find init_lazypoline with unknown error");
+				error!("Failed to find bootstrap_lazypoline with unknown error");
 			}
 			process::exit(1);
 		}
 
-		debug!("Found init_lazypoline function at {:p}", init_fn_ptr);
+		debug!("Found bootstrap_lazypoline function at {:p}", init_fn_ptr);
 
 		let init_fn: extern "C" fn() = std::mem::transmute(init_fn_ptr);
-		debug!("Calling init_lazypoline...");
+		debug!("Calling bootstrap_lazypoline...");
 		init_fn();
-		debug!("init_lazypoline completed");
+		debug!("bootstrap_lazypoline completed");
 	}
 }

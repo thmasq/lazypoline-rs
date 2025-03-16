@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Thomas Q <thomasqsa@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-only"
-description = "Bootstrap loader for lazypoline-rs"
+description = "Bootstrap loader for the lazypoline-rs framework"
 
 [lib]
 name = "bootstrap"

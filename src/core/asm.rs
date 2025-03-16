@@ -12,7 +12,7 @@ pub extern "C" fn teardown_thread_metadata() {
 	// For now, just a placeholder that would be replaced with proper implementation
 	unsafe {
 		// Disable SUD
-		let result = crate::ffi::syscall6(
+		let result = crate::syscall::syscall6(
 			libc::SYS_prctl,
 			i64::from(crate::ffi::PR_SET_SYSCALL_USER_DISPATCH),
 			i64::from(crate::ffi::PR_SYS_DISPATCH_OFF),
@@ -25,7 +25,7 @@ pub extern "C" fn teardown_thread_metadata() {
 
 		// Unmap GSRelData
 		let gs_base = crate::ffi::get_gs_base();
-		let result = crate::ffi::syscall6(
+		let result = crate::syscall::syscall6(
 			libc::SYS_munmap,
 			gs_base.try_into().unwrap(),
 			4096, // Page size
@@ -42,5 +42,5 @@ pub extern "C" fn teardown_thread_metadata() {
 pub extern "C" fn handle_clone_thread(a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64 {
 	// In a real implementation, this would handle thread creation
 	// For now, just forward to syscall6
-	unsafe { crate::ffi::syscall6(libc::SYS_clone, a1, a2, a3, a4, a5, a6) as i64 }
+	unsafe { crate::syscall::syscall6(libc::SYS_clone, a1, a2, a3, a4, a5, a6) }
 }

@@ -483,9 +483,22 @@ pub unsafe extern "C" fn syscall_emulate(
 	a6: i64,
 	should_emulate: *mut u64,
 ) -> i64 {
-	crate::interposer::get_active_interposer().map_or_else(
-		|| unsafe { crate::syscall::syscall6(syscall_no, a1, a2, a3, a4, a5, a6) },
-		|interposer| {
+	// Debugging - uncomment if needed to trace specific syscalls
+	/*
+	if syscall_no == libc::SYS_open || syscall_no == libc::SYS_read {
+		if a1 != 0 {
+			let path = unsafe { std::ffi::CStr::from_ptr(a1 as *const i8) }.to_string_lossy();
+			tracing::debug!("syscall_emulate: syscall={}, path={}, args={}, {}, {}, {}, {}",
+				syscall_no, path, a1, a2, a3, a4, a5);
+		} else {
+			tracing::debug!("syscall_emulate: syscall={}, args={}, {}, {}, {}, {}",
+				syscall_no, a1, a2, a3, a4, a5);
+		}
+	}
+	*/
+
+	match crate::interposer::get_active_interposer() {
+		Some(interposer) => {
 			let syscall = crate::syscall::syscall_from_number(syscall_no).unwrap_or(crate::syscall::Syscall::Unknown);
 
 			let args =
@@ -509,6 +522,7 @@ pub unsafe extern "C" fn syscall_emulate(
 					if !should_emulate.is_null() {
 						unsafe { *should_emulate = 1 };
 					}
+					ctx.should_emulate = true;
 					syscall_no
 				},
 				crate::syscall::SyscallAction::Modify(new_args) => unsafe {
@@ -524,5 +538,6 @@ pub unsafe extern "C" fn syscall_emulate(
 				},
 			}
 		},
-	)
+		None => unsafe { crate::syscall::syscall6(syscall_no, a1, a2, a3, a4, a5, a6) },
+	}
 }

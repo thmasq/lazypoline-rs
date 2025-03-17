@@ -4,12 +4,10 @@
 //! in a new dynamic library namespace, ensuring it doesn't interfere with
 //! the application's libraries.
 
-use std::env;
 use std::ffi::{CString, c_void};
-use std::process;
 use std::sync::Once;
+use std::{env, process};
 use tracing::{debug, error};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 unsafe extern "C" {
 	fn dlmopen(lmid: libc::Lmid_t, filename: *const libc::c_char, flag: libc::c_int) -> *mut c_void;
@@ -21,20 +19,10 @@ static INIT_LOGGER: Once = Once::new();
 
 fn init_logger() {
 	INIT_LOGGER.call_once(|| {
-		let filter = EnvFilter::try_from_default_env()
-			.or_else(|_| {
-				if std::env::var("LAZYPOLINE_DEBUG").is_ok() {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug"))
-				} else {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn"))
-				}
-			})
-			.unwrap();
-
-		tracing_subscriber::registry()
-			.with(fmt::layer().with_target(false))
-			.with(filter)
-			.init();
+		let _ = std::env::var("LAZYPOLINE_DEBUG").unwrap_or_else(|_| {
+			unsafe { std::env::set_var("LAZYPOLINE_DEBUG", "info") };
+			"info".to_string()
+		});
 	});
 }
 

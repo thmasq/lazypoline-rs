@@ -89,17 +89,15 @@ impl InterposerContext {
 	/// This method applies the filter and then calls each handler
 	/// in order until one returns an action other than `Allow`.
 	pub fn process_syscall(&self, ctx: &mut crate::syscall::SyscallContext) -> crate::syscall::SyscallAction {
-		// Get the current thread information from the registry
-		let thread_info = crate::core::thread_registry::registry().get_current_thread_info();
-
-		// Update statistics
-		if let Ok(mut stats) = self.stats.lock() {
+		// Update statistics if we can get the lock without blocking
+		if let Ok(mut stats) = self.stats.try_lock() {
 			stats.increment(ctx.syscall);
+		}
 
-			// Add per-thread statistics if desired
-			if let Some(_thread_info) = &thread_info {
-				// Could track syscalls per thread if needed
-			}
+		// Check if the syscall is in a safe list that should always be allowed
+		// to prevent deadlocks or system crashes
+		if is_critical_syscall(ctx.syscall) {
+			return crate::syscall::SyscallAction::Allow;
 		}
 
 		// Check if the syscall should be filtered
@@ -146,4 +144,23 @@ impl InterposerContext {
 	pub fn get_stats(&self) -> Option<SyscallStats> {
 		self.stats.lock().ok().map(|stats| stats.clone())
 	}
+}
+
+fn is_critical_syscall(syscall: crate::syscall::Syscall) -> bool {
+	// These syscalls are necessary for basic functioning
+	// and should never be blocked
+	matches!(
+		syscall,
+		crate::syscall::Syscall::brk
+			| crate::syscall::Syscall::exit
+			| crate::syscall::Syscall::exit_group
+			| crate::syscall::Syscall::mmap
+			| crate::syscall::Syscall::mprotect
+			| crate::syscall::Syscall::munmap
+			| crate::syscall::Syscall::arch_prctl
+			| crate::syscall::Syscall::rt_sigaction
+			| crate::syscall::Syscall::rt_sigprocmask
+			| crate::syscall::Syscall::rt_sigreturn
+			| crate::syscall::Syscall::prctl
+	)
 }

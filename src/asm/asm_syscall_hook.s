@@ -20,6 +20,9 @@
 .set __NR_clone, 56
 .set __NR_vfork, 58
 
+.set SYSCALL_DISPATCH_FILTER_ALLOW, 0
+.set SYSCALL_DISPATCH_FILTER_BLOCK, 1
+
 # Configuration
 .set SAVE_VECTOR_REGS, 1
 
@@ -90,8 +93,7 @@
 .endm
 
 .macro exit_interposer
-    # Block SUD
-    movb $1, %gs:SUD_SELECTOR_OFFSET
+    movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
 
     # rip_after_syscall should be at top of stack here
 .endm
@@ -104,8 +106,7 @@ asm_syscall_hook:
     # syscall invocation site, except that the rip_after_syscall is
     # pushed to the top of our stack
 
-    # Unblock SUD
-    movb $0, %gs:SUD_SELECTOR_OFFSET
+    movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
 
     pushq %r12  # We use it to check whether we should emulate the syscall or not
 

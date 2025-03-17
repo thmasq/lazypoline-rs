@@ -3,7 +3,8 @@
 //! This module provides logging functionality for lazypoline.
 
 use std::sync::Once;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 
 // Initialize logging once
 static INIT: Once = Once::new();
@@ -18,18 +19,39 @@ pub fn init_logging() {
 	INIT.call_once(|| {
 		let filter = EnvFilter::try_from_default_env()
 			.or_else(|_| {
-				if std::env::var("LAZYPOLINE_DEBUG").is_ok() {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug"))
+				if let Ok(level) = std::env::var("LAZYPOLINE_DEBUG") {
+					match level.to_lowercase().as_str() {
+						"trace" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=trace")),
+						"debug" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug")),
+						"info" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=info")),
+						"warn" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn")),
+						"error" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=error")),
+						_ if !level.is_empty() => {
+							Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug"))
+						},
+						_ => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn")),
+					}
 				} else {
 					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn"))
 				}
 			})
 			.unwrap();
 
-		tracing_subscriber::registry()
+		let registry = tracing_subscriber::registry()
 			.with(fmt::layer().with_target(true))
-			.with(filter)
-			.init();
+			.with(filter);
+
+		match registry.try_init() {
+			Ok(_) => {
+				tracing::info!("Lazypoline logging initialized at level: {}", log_level());
+			},
+			Err(e) => {
+				eprintln!(
+					"Note: Could not initialize tracing (probably already initialized): {}",
+					e
+				);
+			},
+		}
 	});
 }
 
@@ -42,7 +64,8 @@ pub fn init_logging() {
 /// - "warn" - Warning level
 /// - "error" - Error level
 /// - "off" - Logging is disabled
-#[must_use] pub fn log_level() -> &'static str {
+#[must_use]
+pub fn log_level() -> &'static str {
 	if tracing::level_enabled!(tracing::Level::TRACE) {
 		"trace"
 	} else if tracing::level_enabled!(tracing::Level::DEBUG) {

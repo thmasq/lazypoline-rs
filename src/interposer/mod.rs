@@ -52,11 +52,24 @@ impl Interposer {
 			return Err(InterposerError::AlreadyInitialized);
 		}
 
+		// First, initialize logging to make sure we can see what's happening
+		crate::util::init_logging();
+
+		tracing::info!("Initializing lazypoline interposer...");
+
 		// Register this interposer as the active one
 		set_active_interposer(self.context.clone());
 
 		unsafe {
-			crate::core::sud::init_sud()?;
+			// Initialize SUD first
+			tracing::info!("Initializing SUD...");
+			match crate::core::sud::init_sud() {
+				Ok(_) => tracing::info!("SUD initialized successfully"),
+				Err(e) => {
+					tracing::error!("Failed to initialize SUD: {}", e);
+					return Err(e);
+				},
+			}
 
 			// Get the GSRelData for the main thread
 			let gs_base = crate::ffi::get_gs_base();
@@ -64,19 +77,48 @@ impl Interposer {
 				// Initialize the thread registry with the main thread
 				let gsreldata = gs_base as *mut crate::core::gsrel::GSRelData;
 				crate::core::thread_registry::init_with_main_thread(gsreldata);
+				tracing::info!("Thread registry initialized with main thread");
+			} else {
+				tracing::warn!("Could not get GS base, thread registry not initialized");
 			}
 
 			// Initialize zpoline if configured
 			if self.context.config.rewrite_to_zpoline {
-				crate::core::zpoline::init_zpoline()?;
+				tracing::info!("Initializing zpoline...");
+				match crate::core::zpoline::init_zpoline() {
+					Ok(_) => tracing::info!("Zpoline initialized successfully"),
+					Err(e) => {
+						tracing::error!("Failed to initialize zpoline: {}", e);
+						return Err(e);
+					},
+				}
 			}
 
-			crate::core::sud::enable_sud()?;
+			// Now enable SUD with everything set up
+			tracing::info!("Enabling SUD...");
+			match crate::core::sud::enable_sud() {
+				Ok(_) => tracing::info!("SUD enabled successfully"),
+				Err(e) => {
+					tracing::error!("Failed to enable SUD: {}", e);
+					return Err(e);
+				},
+			}
 
-			crate::core::gsrel::set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_BLOCK);
+			// Start with syscalls allowed
+			tracing::info!("Setting initial privilege level to ALLOW");
+			crate::core::gsrel::set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
+
+			// Verify the privilege level is set correctly
+			let level = crate::core::gsrel::get_privilege_level();
+			tracing::info!("Current privilege level: {}", level);
+			if level != crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW {
+				tracing::warn!("Privilege level not set to ALLOW, attempting to correct");
+				crate::core::gsrel::set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
+			}
 		}
 
 		self.initialized = true;
+		tracing::info!("Interposer initialized successfully!");
 		Ok(self)
 	}
 
@@ -101,12 +143,24 @@ impl Interposer {
 impl Drop for Interposer {
 	fn drop(&mut self) {
 		if self.initialized {
+			tracing::info!("Shutting down interposer...");
+
+			// Ensure syscalls are allowed during cleanup
+			crate::core::gsrel::set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
+
+			// Clear active interposer
 			clear_active_interposer();
 
+			// Disable SUD
 			unsafe {
-				crate::core::gsrel::set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
-				crate::core::sud::disable_sud().ok();
+				if let Err(e) = crate::core::sud::disable_sud() {
+					tracing::error!("Error disabling SUD during shutdown: {}", e);
+				} else {
+					tracing::info!("SUD disabled successfully");
+				}
 			}
+
+			tracing::info!("Interposer shut down successfully");
 		}
 	}
 }

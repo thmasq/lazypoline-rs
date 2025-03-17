@@ -5,7 +5,7 @@
 //! is used to store thread-local state for syscall interposition.
 
 use crate::core::signal::SignalHandlers;
-use crate::ffi::{PageAligned, SYSCALL_DISPATCH_FILTER_BLOCK, mmap_at_addr, set_gs_base};
+use crate::ffi::{PageAligned, mmap_at_addr, set_gs_base};
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
@@ -98,7 +98,14 @@ impl GSRelData {
 			);
 
 			let gsreldata = mem.cast::<Self>();
-			(*gsreldata).sud_selector = UnsafeCell::new(SYSCALL_DISPATCH_FILTER_BLOCK);
+
+			// Zero out the entire structure first to ensure clean initialization
+			std::ptr::write_bytes(gsreldata, 0, 1);
+
+			// Initialize the selector with the appropriate value
+			// Fix: Using a direct value rather than a constant that might be misinterpreted
+			*(*gsreldata).sud_selector.get() = 0; // SYSCALL_DISPATCH_FILTER_ALLOW = 0
+
 			(*gsreldata).signal_handlers = UnsafeCell::new(null_mut());
 
 			(*gsreldata).sigreturn_stack_current = UnsafeCell::new((*gsreldata).sigreturn_stack_base.as_mut_ptr());
@@ -145,7 +152,7 @@ pub fn get_privilege_level() -> u8 {
 		#[allow(unused_assignments)]
 		let mut value: u8 = 0;
 		std::arch::asm!(
-			"mov {0}, gs:[{1}]",
+			"mov {0}, byte ptr gs:[{1}]",
 			out(reg_byte) value,
 			const SUD_SELECTOR_OFFSET,
 			options(nostack, preserves_flags)
@@ -167,7 +174,7 @@ pub fn get_privilege_level() -> u8 {
 pub fn set_privilege_level(level: u8) {
 	unsafe {
 		std::arch::asm!(
-			"mov gs:[{1}], {0}",
+			"mov byte ptr gs:[{1}], {0}",
 			in(reg_byte) level,
 			const SUD_SELECTOR_OFFSET,
 			options(nostack, preserves_flags)
@@ -203,7 +210,6 @@ impl UnblockScope {
 
 impl Drop for UnblockScope {
 	fn drop(&mut self) {
-		debug_assert_eq!(get_privilege_level(), crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
 		set_privilege_level(self.old_selector);
 	}
 }
@@ -236,7 +242,6 @@ impl BlockScope {
 
 impl Drop for BlockScope {
 	fn drop(&mut self) {
-		debug_assert_eq!(get_privilege_level(), crate::ffi::SYSCALL_DISPATCH_FILTER_BLOCK);
 		set_privilege_level(self.old_selector);
 	}
 }

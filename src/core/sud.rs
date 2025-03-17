@@ -188,9 +188,15 @@ pub unsafe fn init_sud() -> Result<()> {
 	}
 	info!("sud: GSRelData mapped at address {gsreldata:p}");
 
-	// Initialize the SUD selector
-	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW);
-	info!("sud: SUD selector initialized to ALLOW");
+	// Initialize the SUD selector - explicitly set to 0 (ALLOW)
+	let selector_ptr = unsafe { (*gsreldata).sud_selector.get() };
+	unsafe {
+		*selector_ptr = crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW;
+	}
+
+	// Verify the selector is set properly
+	let selector_value = unsafe { *selector_ptr };
+	info!("sud: SUD selector initialized to {selector_value} (ALLOW)");
 
 	// Allocate and initialize signal handlers
 	let signal_handlers = unsafe { SignalHandlers::new() };
@@ -293,9 +299,20 @@ pub unsafe fn enable_sud() -> Result<()> {
 	let selector_addr = gs_base + crate::core::gsrel::SUD_SELECTOR_OFFSET as u64;
 	info!("sud: SUD selector address: 0x{selector_addr:x}");
 
-	// Verify the selector address is accessible
+	// Verify the selector address is accessible and has the right value
 	let selector = unsafe { *(selector_addr as *const u8) };
-	info!("sud: Current selector value: {selector}");
+	if selector != crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW {
+		// Attempt to correct the value if it's wrong
+		unsafe {
+			*(selector_addr as *mut u8) = crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW;
+		}
+		info!(
+			"sud: Corrected selector value to {} (ALLOW)",
+			crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW
+		);
+	} else {
+		info!("sud: Current selector value: {} (ALLOW)", selector);
+	}
 
 	// Enable SUD
 	match set_syscall_user_dispatch(PR_SYS_DISPATCH_ON, selector_addr as *const u8) {

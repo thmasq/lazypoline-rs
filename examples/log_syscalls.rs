@@ -52,8 +52,6 @@ fn log_interesting_syscalls(ctx: &mut SyscallContext) -> SyscallAction {
 // This is the entry point that will be called by the bootstrap loader
 #[unsafe(no_mangle)]
 pub extern "C" fn bootstrap_lazypoline() {
-	env_logger::init();
-
 	println!("Initializing syscall logger...");
 
 	// Set up the interposer with our handler

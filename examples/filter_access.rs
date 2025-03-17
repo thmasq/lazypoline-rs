@@ -41,9 +41,6 @@ fn filter_sensitive_files(ctx: &mut SyscallContext) -> SyscallAction {
 // This is the entry point that will be called by the bootstrap loader
 #[unsafe(no_mangle)]
 pub extern "C" fn bootstrap_lazypoline() {
-	// Initialize logging
-	env_logger::init();
-
 	println!("Initializing file access filter...");
 	println!("The following paths will be restricted:");
 	for path in RESTRICTED_PATHS {

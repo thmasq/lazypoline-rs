@@ -53,18 +53,22 @@ pub fn handle_syscall_handler(attr: TokenStream, item: TokenStream) -> TokenStre
 			}
 		}
 
-		impl #fn_generics ::lazypoline::SyscallHandler for #struct_ident #fn_generics {
-			fn handle_syscall(&self, ctx: &mut ::lazypoline::SyscallContext) -> ::lazypoline::SyscallAction {
+		impl #fn_generics ::lazypoline_rs::SyscallHandler for #struct_ident #fn_generics {
+			fn handle_syscall(&self, ctx: &mut ::lazypoline_rs::SyscallContext) -> ::lazypoline_rs::SyscallAction {
 				#fn_name(ctx)
 			}
 
 			fn name(&self) -> &'static str {
 				stringify!(#fn_name)
 			}
+
+			fn clone_box(&self) -> Box<dyn ::lazypoline_rs::SyscallHandler> {
+				Box::new(Self)
+			}
 		}
 
 		#(#fn_attrs)*
-		#fn_vis fn #fn_name #fn_generics(ctx: &mut ::lazypoline::SyscallContext) -> ::lazypoline::SyscallAction {
+		#fn_vis fn #fn_name #fn_generics(ctx: &mut ::lazypoline_rs::SyscallContext) -> ::lazypoline_rs::SyscallAction {
 			#fn_block
 		}
 	};
@@ -133,7 +137,11 @@ fn validate_handler_signature(input_fn: &ItemFn) {
 		},
 		FnArg::Typed(PatType { ty, pat, .. }) => {
 			let ty_str = quote!(#ty).to_string();
-			if !ty_str.contains("&mut") || !ty_str.contains("SyscallContext") {
+
+			if !(ty_str.contains('&')
+				&& (ty_str.contains("mut") || ty_str.contains(" mut "))
+				&& ty_str.contains("SyscallContext"))
+			{
 				panic!("Syscall handler argument must be &mut SyscallContext, got {}", ty_str);
 			}
 

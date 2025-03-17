@@ -39,14 +39,14 @@ strip = true
 codegen-units = 1
 panic = "abort"
 
-# [[example]]
-# name = "log_syscalls"
-# path = "examples/log_syscalls.rs"
+[[example]]
+name = "log_syscalls"
+path = "examples/log_syscalls.rs"
 
-# [[example]]
-# name = "filter_access"
-# path = "examples/filter_access.rs"
+[[example]]
+name = "filter_access"
+path = "examples/filter_access.rs"
 
-# [[example]]
-# name = "override_proc_version"
-# path = "examples/override_proc_version.rs"
+[[example]]
+name = "override_proc_version"
+path = "examples/override_proc_version.rs"

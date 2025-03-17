@@ -134,7 +134,9 @@ fn override_proc_version(ctx: &mut SyscallContext) -> SyscallAction {
 	SyscallAction::Allow
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+// This is the entry point that will be called by the bootstrap loader
+#[unsafe(no_mangle)]
+pub extern "C" fn bootstrap_lazypoline() {
 	// Initialize logging
 	env_logger::init();
 
@@ -142,17 +144,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("Will replace /proc/version with: {}", FAKE_VERSION);
 
 	// Set up the interposer with our override handler
-	let _interposer = lazypoline_rs::new()
+	match lazypoline_rs::new()
 		.handler(OverrideProcVersion::new())
-		.build()?
-		.init()?;
+		.build()
+		.and_then(|i| i.init())
+	{
+		Ok(interposer) => {
+			// Store interposer in a static to keep it alive (prevent drop)
+			use std::sync::Once;
+			static INIT: Once = Once::new();
+			static mut INTERPOSER: Option<lazypoline_rs::Interposer> = None;
 
-	println!("Override initialized successfully!");
-	println!("Try running: cat /proc/version");
-	println!("Press Ctrl+C to exit");
+			INIT.call_once(|| {
+				unsafe { INTERPOSER = Some(interposer) };
+			});
 
-	// Keep the program running
-	loop {
-		std::thread::sleep(std::time::Duration::from_secs(60));
+			println!("Override initialized successfully!");
+			println!("Try running: cat /proc/version");
+		},
+		Err(e) => {
+			eprintln!("Failed to initialize proc version override: {}", e);
+			std::process::exit(1);
+		},
 	}
 }

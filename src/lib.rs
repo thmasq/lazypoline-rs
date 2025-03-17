@@ -43,7 +43,8 @@ pub use interposer::{Interposer, InterposerBuilder, InterposerError};
 pub use syscall::{Syscall, SyscallAction, SyscallArgs, SyscallContext};
 
 /// Create a new interposer builder
-#[must_use] pub fn new() -> InterposerBuilder {
+#[must_use]
+pub fn new() -> InterposerBuilder {
 	InterposerBuilder::new()
 }
 
@@ -57,13 +58,4 @@ pub fn init() -> Result<Interposer, InterposerError> {
 /// Shorthand for setting up a simple syscall tracer
 pub fn trace() -> Result<Interposer, InterposerError> {
 	new().trace(true).build()?.init()
-}
-
-// Export for FFI (used by bootstrap)
-#[unsafe(no_mangle)]
-pub extern "C" fn bootstrap_lazypoline() {
-	if let Err(e) = init() {
-		eprintln!("Failed to initialize lazypoline: {e}");
-		std::process::exit(1);
-	}
 }

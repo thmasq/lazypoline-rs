@@ -49,24 +49,35 @@ fn log_interesting_syscalls(ctx: &mut SyscallContext) -> SyscallAction {
 	SyscallAction::Allow
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-	// Enable logging
+// This is the entry point that will be called by the bootstrap loader
+#[unsafe(no_mangle)]
+pub extern "C" fn bootstrap_lazypoline() {
 	env_logger::init();
 
 	println!("Initializing syscall logger...");
 
 	// Set up the interposer with our handler
-	let _interposer = lazypoline_rs::new()
+	match lazypoline_rs::new()
 		.handler(LogInterestingSyscalls::new())
-		.build()?
-		.init()?;
+		.build()
+		.and_then(|i| i.init())
+	{
+		Ok(interposer) => {
+			// Store interposer in a static to keep it alive (prevent drop)
+			use std::sync::Once;
+			static INIT: Once = Once::new();
+			static mut INTERPOSER: Option<lazypoline_rs::Interposer> = None;
 
-	println!("Syscall logger initialized successfully!");
-	println!("Now logging open, openat, read, and write syscalls...");
-	println!("Press Ctrl+C to exit");
+			INIT.call_once(|| {
+				unsafe { INTERPOSER = Some(interposer) };
+			});
 
-	// Keep the program running
-	loop {
-		std::thread::sleep(std::time::Duration::from_secs(60));
+			println!("Syscall logger initialized successfully!");
+			println!("Now logging open, openat, read, and write syscalls...");
+		},
+		Err(e) => {
+			eprintln!("Failed to initialize syscall logger: {}", e);
+			std::process::exit(1);
+		},
 	}
 }

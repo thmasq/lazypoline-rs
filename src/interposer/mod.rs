@@ -17,7 +17,8 @@ pub use handler::{DefaultHandler, SyscallHandler, TracingHandler};
 use std::sync::RwLock;
 
 // Global registry for the active interposer
-static ACTIVE_INTERPOSER: std::sync::LazyLock<RwLock<Option<InterposerContext>>> = std::sync::LazyLock::new(|| RwLock::new(None));
+static ACTIVE_INTERPOSER: std::sync::LazyLock<RwLock<Option<InterposerContext>>> =
+	std::sync::LazyLock::new(|| RwLock::new(None));
 
 /// Main interposer struct
 ///
@@ -57,6 +58,15 @@ impl Interposer {
 		unsafe {
 			crate::core::sud::init_sud()?;
 
+			// Get the GSRelData for the main thread
+			let gs_base = crate::ffi::get_gs_base();
+			if gs_base != 0 {
+				// Initialize the thread registry with the main thread
+				let gsreldata = gs_base as *mut crate::core::gsrel::GSRelData;
+				crate::core::thread_registry::init_with_main_thread(gsreldata);
+			}
+
+			// Initialize zpoline if configured
 			if self.context.config.rewrite_to_zpoline {
 				crate::core::zpoline::init_zpoline()?;
 			}
@@ -71,12 +81,14 @@ impl Interposer {
 	}
 
 	/// Check if the interposer is initialized
-	#[must_use] pub const fn is_initialized(&self) -> bool {
+	#[must_use]
+	pub const fn is_initialized(&self) -> bool {
 		self.initialized
 	}
 
 	/// Get the interposer context
-	#[must_use] pub const fn context(&self) -> &InterposerContext {
+	#[must_use]
+	pub const fn context(&self) -> &InterposerContext {
 		&self.context
 	}
 

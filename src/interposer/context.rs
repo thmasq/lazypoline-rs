@@ -70,7 +70,8 @@ impl std::fmt::Debug for InterposerContext {
 
 impl InterposerContext {
 	/// Create a new interposer context
-	#[must_use] pub fn new(
+	#[must_use]
+	pub fn new(
 		config: InterposerConfig,
 		handlers: Vec<Box<dyn SyscallHandler>>,
 		filter: Box<dyn SyscallFilter>,
@@ -88,13 +89,26 @@ impl InterposerContext {
 	/// This method applies the filter and then calls each handler
 	/// in order until one returns an action other than `Allow`.
 	pub fn process_syscall(&self, ctx: &mut crate::syscall::SyscallContext) -> crate::syscall::SyscallAction {
+		// Get the current thread information from the registry
+		let thread_info = crate::core::thread_registry::registry().get_current_thread_info();
+
 		// Update statistics
 		if let Ok(mut stats) = self.stats.lock() {
 			stats.increment(ctx.syscall);
+
+			// Add per-thread statistics if desired
+			if let Some(_thread_info) = &thread_info {
+				// Could track syscalls per thread if needed
+			}
 		}
 
 		// Check if the syscall should be filtered
 		if !self.filter.allow_syscall(ctx) {
+			tracing::debug!(
+				"Blocked syscall {} by filter {}",
+				ctx.syscall.name(),
+				self.filter.name()
+			);
 			return crate::syscall::SyscallAction::Block((-libc::EPERM).into());
 		}
 
@@ -103,7 +117,23 @@ impl InterposerContext {
 			let action = handler.handle_syscall(ctx);
 			match action {
 				crate::syscall::SyscallAction::Allow => continue,
-				_ => return action,
+				crate::syscall::SyscallAction::Block(code) => {
+					tracing::debug!(
+						"Blocked syscall {} by handler {} with code {}",
+						ctx.syscall.name(),
+						handler.name(),
+						code
+					);
+					return action;
+				},
+				crate::syscall::SyscallAction::Emulate => {
+					tracing::debug!("Emulating syscall {} by handler {}", ctx.syscall.name(), handler.name());
+					return action;
+				},
+				crate::syscall::SyscallAction::Modify(_) => {
+					tracing::debug!("Modified syscall {} by handler {}", ctx.syscall.name(), handler.name());
+					return action;
+				},
 			}
 		}
 
@@ -112,7 +142,8 @@ impl InterposerContext {
 	}
 
 	/// Get a clone of the current statistics
-	#[must_use] pub fn get_stats(&self) -> Option<SyscallStats> {
+	#[must_use]
+	pub fn get_stats(&self) -> Option<SyscallStats> {
 		self.stats.lock().ok().map(|stats| stats.clone())
 	}
 }

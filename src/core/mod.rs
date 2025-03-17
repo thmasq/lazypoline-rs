@@ -9,6 +9,7 @@ pub mod asm;
 pub mod gsrel;
 pub mod signal;
 pub mod sud;
+pub mod thread_registry;
 pub mod zpoline;
 
 // Also re-export the FFI module for convenience

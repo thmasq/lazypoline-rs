@@ -3,7 +3,7 @@
 //! This module implements signal handling for lazypoline, particularly
 //! for handling the SIGSYS signal used by Syscall User Dispatch (SUD).
 
-use crate::core::gsrel::{BlockScope, get_privilege_level, set_privilege_level};
+use crate::core::gsrel::{BlockScope, GSRelData, get_privilege_level, set_privilege_level};
 use crate::ffi::{SpinLock, SpinLockGuard, rt_sigaction_raw};
 use libc::{SA_SIGINFO, SIG_DFL, SIG_IGN, SIGSYS, c_int, c_void, sigaction, siginfo_t, sigset_t, ucontext_t};
 use std::cell::UnsafeCell;
@@ -100,8 +100,26 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
 	let rsp = unsafe { *gregs.add(libc::REG_RSP as usize) };
 
-	let gsreldata = unsafe { crate::core::gsrel::GSRelData::new() };
+	// Look up the thread in the registry to get its GSRelData
+	let registry = crate::core::thread_registry::registry();
+	let gsreldata = if let Some(thread_info) = registry.get_current_thread_info() {
+		thread_info.gsreldata
+	} else {
+		// Fall back to GS base if not in registry
+		let gs_base = unsafe { crate::ffi::get_gs_base() };
+		if gs_base != 0 {
+			gs_base as *mut GSRelData
+		} else {
+			tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
+			panic!("Failed to get GSRelData for current thread");
+		}
+	};
+
 	let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
+	if signal_handlers.is_null() {
+		tracing::error!("wrap_signal_handler: No signal handlers found for current thread");
+		panic!("No signal handlers found for current thread");
+	}
 
 	unsafe { (*signal_handlers).invoke_app_specific_handler(signo, info, context) };
 
@@ -166,33 +184,72 @@ impl SignalHandlers {
 				std::ptr::write(app_handlers_ptr.add(i), dfl_handler);
 			}
 
-			// Now properly handle signal actions
-			for i in 1..NSIG {
-				if i == libc::SIGKILL as usize {
-					continue;
+			// Check if this is a new thread that should inherit signal handlers
+			let should_inherit = {
+				let registry = crate::core::thread_registry::registry();
+				// Only inherit if we're not the main thread and the parent shares signal handlers
+				if let Some(thread_info) = registry.get_current_thread_info() {
+					thread_info.parent_thread_id.is_some() && thread_info.shares_signal_handlers()
+				} else {
+					false
 				}
+			};
 
-				let mut act: MaybeUninit<sigaction> = MaybeUninit::uninit();
-				let result = rt_sigaction_raw(i as c_int, null(), act.as_mut_ptr(), 8);
-				if result == 0 {
-					let act = act.assume_init();
+			if should_inherit {
+				// This is a thread that should inherit signal handlers from its parent
+				if let Some(parent_info) = crate::core::thread_registry::registry().get_current_parent_thread_info() {
+					// Get the parent's signal handlers
+					let parent_gsreldata = parent_info.gsreldata;
+					if !parent_gsreldata.is_null() {
+						// Get the parent's signal handlers
+						let parent_signal_handlers = *(*parent_gsreldata).signal_handlers.get();
+						if !parent_signal_handlers.is_null() {
+							// Copy the parent's app_handlers - we need to copy each element individually
+							let parent_app_handlers_ptr = (*parent_signal_handlers).app_handlers.get();
+							// Get the array inside the UnsafeCell
+							let parent_handlers = &*parent_app_handlers_ptr;
 
-					// Create a MaybeUninit for this handler
-					let mut handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-					let handler_ptr = handler_uninit.as_mut_ptr();
+							for i in 0..NSIG {
+								// Copy each handler individually
+								std::ptr::write(app_handlers_ptr.add(i), parent_handlers[i]);
+							}
 
-					// Initialize handler fields
-					(*handler_ptr).handler = mem::transmute(act.sa_sigaction);
-					(*handler_ptr).flags = act.sa_flags as u64;
-					(*handler_ptr).restorer = None;
-					(*handler_ptr).mask = act.sa_mask;
+							tracing::debug!("Inherited signal handlers from parent thread");
+							// Also copy the default handler
+							dfl_handler = (*parent_signal_handlers).dfl_handler;
+						}
+					}
+				}
+			} else {
+				// This is a new process or a thread that doesn't share signal handlers
+				// Now properly handle signal actions
+				for i in 1..NSIG {
+					if i == libc::SIGKILL as usize {
+						continue;
+					}
 
-					let handler = handler_uninit.assume_init();
-					std::ptr::write(app_handlers_ptr.add(i), handler);
+					let mut act: MaybeUninit<sigaction> = MaybeUninit::uninit();
+					let result = rt_sigaction_raw(i as c_int, null(), act.as_mut_ptr(), 8);
+					if result == 0 {
+						let act = act.assume_init();
 
-					if act.sa_sigaction == mem::transmute(SIG_DFL) {
-						// If this is a default handler, save it
-						dfl_handler = handler;
+						// Create a MaybeUninit for this handler
+						let mut handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
+						let handler_ptr = handler_uninit.as_mut_ptr();
+
+						// Initialize handler fields
+						(*handler_ptr).handler = mem::transmute(act.sa_sigaction);
+						(*handler_ptr).flags = act.sa_flags as u64;
+						(*handler_ptr).restorer = None;
+						(*handler_ptr).mask = act.sa_mask;
+
+						let handler = handler_uninit.assume_init();
+						std::ptr::write(app_handlers_ptr.add(i), handler);
+
+						if act.sa_sigaction == mem::transmute(SIG_DFL) {
+							// If this is a default handler, save it
+							dfl_handler = handler;
+						}
 					}
 				}
 			}
@@ -208,6 +265,7 @@ impl SignalHandlers {
 				},
 			);
 
+			tracing::debug!("Created signal handlers at {:p}", handlers);
 			handlers
 		}
 	}
@@ -270,6 +328,14 @@ impl SignalHandlers {
 	/// - Modifies signal handling state that affects the entire process
 	/// - Uses low-level system calls
 	pub unsafe fn handle_app_sigaction(&self, signo: c_int, newact: *const sigaction, oldact: *mut sigaction) -> i64 {
+		// Log the signal action request
+		tracing::trace!(
+			"handle_app_sigaction: signo={}, newact={:?}, oldact={:?}",
+			signo,
+			newact,
+			oldact
+		);
+
 		// Hold lock while operating on app_handlers
 		let _guard = SpinLockGuard::new(&self.lock);
 
@@ -321,6 +387,9 @@ impl SignalHandlers {
 				unsafe {
 					(*app_handlers_ptr)[signo as usize] = new_handler;
 				}
+
+				// Propagate to other threads that share signal handlers with this thread
+				self.propagate_signal_handler_change(signo, &new_handler);
 			}
 
 			return 0;
@@ -360,6 +429,9 @@ impl SignalHandlers {
 				unsafe {
 					(*app_handlers_ptr)[signo as usize] = new_handler;
 				}
+
+				// Propagate to other threads that share signal handlers with this thread
+				self.propagate_signal_handler_change(signo, &new_handler);
 
 				if !oldact.is_null() {
 					unsafe { *oldact = old };
@@ -407,6 +479,9 @@ impl SignalHandlers {
 		unsafe {
 			(*app_handlers_ptr)[signo as usize] = new_handler;
 		}
+
+		// Propagate to other threads that share signal handlers with this thread
+		self.propagate_signal_handler_change(signo, &new_handler);
 
 		if !oldact.is_null() {
 			unsafe { *oldact = old };
@@ -523,5 +598,118 @@ impl SignalHandlers {
 	fn is_terminating_sig(signo: c_int) -> bool {
 		let behavior = Self::get_default_behavior(signo);
 		behavior == SigDispType::Term || behavior == SigDispType::Core
+	}
+
+	/// Propagate signal handler changes to other threads that share signal handlers
+	///
+	/// When a thread that's part of a thread group (CLONE_THREAD) and shares signal handlers
+	/// (CLONE_SIGHAND) changes a signal handler, that change should be reflected in all
+	/// other threads in the group.
+	///
+	/// # Parameters
+	///
+	/// * `signo` - The signal number
+	/// * `handler` - The new handler
+	///
+	/// # Safety
+	///
+	/// This method is called with the signal handler lock held, so it's safe to
+	/// modify the signal handlers.
+	fn propagate_signal_handler_change(&self, signo: c_int, handler: &KernelSigaction) {
+		// Check if the current thread is part of a thread group
+		let registry = crate::core::thread_registry::registry();
+		let current_thread_info = match registry.get_current_thread_info() {
+			Some(info) => info,
+			None => return, // Not a registered thread, nothing to propagate
+		};
+
+		// Only propagate if this thread is part of a thread group and shares signal handlers
+		if !current_thread_info.is_thread() || !current_thread_info.shares_signal_handlers() {
+			return;
+		}
+
+		// Get all threads in the registry
+		let all_thread_info = registry.all_thread_info();
+
+		// Current thread's process ID - threads in the same group have the same process ID
+		let current_pid = current_thread_info.process_id;
+
+		// Propagate to all threads in the same process group that share signal handlers
+		for thread_info in all_thread_info {
+			// Skip self
+			if std::ptr::eq(thread_info.gsreldata, current_thread_info.gsreldata) {
+				continue;
+			}
+
+			// Only propagate to threads in the same process group
+			if thread_info.process_id != current_pid {
+				continue;
+			}
+
+			// Only propagate to threads that share signal handlers
+			if !thread_info.is_thread() || !thread_info.shares_signal_handlers() {
+				continue;
+			}
+
+			// Get the thread's signal handlers
+			let gsreldata = thread_info.gsreldata;
+			if gsreldata.is_null() {
+				continue;
+			}
+
+			let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
+			if signal_handlers.is_null() {
+				continue;
+			}
+
+			// Update the signal handler
+			// Note: this is safe because we hold the lock on *our* signal handlers,
+			// and the thread shares signal handlers with us, so we're effectively
+			// operating on the same memory
+			unsafe {
+				let app_handlers_ptr = (*signal_handlers).app_handlers.get();
+				(*app_handlers_ptr)[signo as usize] = *handler;
+			}
+
+			tracing::trace!(
+				"Propagated signal handler change for signal {} to thread {:?}",
+				signo,
+				thread_info.thread_id
+			);
+		}
+	}
+
+	/// Creates a deep copy of these signal handlers
+	///
+	/// # Returns
+	///
+	/// A new `SignalHandlers` instance that is a copy of this one
+	#[must_use]
+	pub unsafe fn clone(&self) -> *mut Self {
+		unsafe {
+			let new_handlers = libc::malloc(std::mem::size_of::<Self>()).cast::<Self>();
+			assert!(!new_handlers.is_null(), "Failed to allocate SignalHandlers");
+
+			// Copy the dfl_handler
+			let dfl_handler = self.dfl_handler;
+
+			// Copy the app_handlers
+			let mut app_handlers = [dfl_handler; NSIG];
+			let app_handlers_ptr = self.app_handlers.get();
+			for i in 0..NSIG {
+				app_handlers[i] = (*app_handlers_ptr)[i];
+			}
+
+			std::ptr::write(
+				new_handlers,
+				Self {
+					dfl_handler,
+					app_handlers: UnsafeCell::new(app_handlers),
+					lock: SpinLock::new(),
+				},
+			);
+
+			new_handlers
+		}
 	}
 }

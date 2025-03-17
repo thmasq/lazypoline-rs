@@ -111,6 +111,20 @@ impl GSRelData {
 			let result = set_gs_base(gsreldata as u64);
 			assert_eq!(result, 0, "Failed to set GS base register");
 
+			// Register this GSRelData with the thread registry if we're not the very first thread
+			if crate::core::thread_registry::registry().thread_count() > 0 {
+				// We're not the main thread, so find our parent
+				let mut parent_thread_id = None;
+
+				// Try to get parent ThreadId from the registry if possible
+				if let Some(parent_info) = crate::core::thread_registry::registry().get_current_parent_thread_info() {
+					parent_thread_id = Some(parent_info.thread_id);
+				}
+
+				// Register current thread
+				crate::core::thread_registry::registry().register_current_thread(gsreldata, parent_thread_id, None);
+			}
+
 			gsreldata
 		}
 	}

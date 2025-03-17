@@ -22,8 +22,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-anyhow = "1.0"
-tempfile = "3.10"
+env_logger = "0.11"
+once_cell = "1.21"
 
 [build-dependencies]
 cc = "1.2"
@@ -38,3 +38,15 @@ lto = "fat"
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# [[example]]
+# name = "log_syscalls"
+# path = "examples/log_syscalls.rs"
+
+# [[example]]
+# name = "filter_access"
+# path = "examples/filter_access.rs"
+
+# [[example]]
+# name = "override_proc_version"
+# path = "examples/override_proc_version.rs"

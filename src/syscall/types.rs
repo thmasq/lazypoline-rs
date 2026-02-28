@@ -37,7 +37,8 @@ pub struct SyscallArgs {
 
 impl SyscallArgs {
 	/// Create a new `SyscallArgs` struct from individual arguments
-	#[must_use] pub const fn new(rdi: u64, rsi: u64, rdx: u64, r10: u64, r8: u64, r9: u64) -> Self {
+	#[must_use]
+	pub const fn new(rdi: u64, rsi: u64, rdx: u64, r10: u64, r8: u64, r9: u64) -> Self {
 		Self {
 			rdi,
 			rsi,
@@ -49,7 +50,8 @@ impl SyscallArgs {
 	}
 
 	/// Get a specific argument by index (0-5)
-	#[must_use] pub const fn get(&self, index: usize) -> Option<u64> {
+	#[must_use]
+	pub const fn get(&self, index: usize) -> Option<u64> {
 		match index {
 			0 => Some(self.rdi),
 			1 => Some(self.rsi),

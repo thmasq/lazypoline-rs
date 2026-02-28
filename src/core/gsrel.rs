@@ -4,6 +4,8 @@
 //! used for thread-local storage in lazypoline. The GS register
 //! is used to store thread-local state for syscall interposition.
 
+#![allow(clippy::inline_always)]
+
 use crate::core::signal::SignalHandlers;
 use crate::ffi::{PageAligned, mmap_at_addr, set_gs_base};
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
@@ -121,12 +123,9 @@ impl GSRelData {
 			// Register this GSRelData with the thread registry if we're not the very first thread
 			if crate::core::thread_registry::registry().thread_count() > 0 {
 				// We're not the main thread, so find our parent
-				let mut parent_thread_id = None;
-
-				// Try to get parent ThreadId from the registry if possible
-				if let Some(parent_info) = crate::core::thread_registry::registry().get_current_parent_thread_info() {
-					parent_thread_id = Some(parent_info.thread_id);
-				}
+				let parent_thread_id = crate::core::thread_registry::registry()
+					.get_current_parent_thread_info()
+					.map(|parent_info| parent_info.thread_id);
 
 				// Register current thread
 				crate::core::thread_registry::registry().register_current_thread(gsreldata, parent_thread_id, None);

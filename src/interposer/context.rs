@@ -113,6 +113,8 @@ impl InterposerContext {
 		// Call each handler until one returns a non-Allow action
 		for handler in &self.handlers {
 			let action = handler.handle_syscall(ctx);
+
+			#[allow(clippy::needless_continue)]
 			match action {
 				crate::syscall::SyscallAction::Allow => continue,
 				crate::syscall::SyscallAction::Block(code) => {
@@ -146,7 +148,7 @@ impl InterposerContext {
 	}
 }
 
-fn is_critical_syscall(syscall: crate::syscall::Syscall) -> bool {
+const fn is_critical_syscall(syscall: crate::syscall::Syscall) -> bool {
 	// These syscalls are necessary for basic functioning
 	// and should never be blocked
 	matches!(

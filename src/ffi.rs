@@ -223,8 +223,8 @@ pub mod functions {
 		let result = unsafe {
 			syscall6(
 				libc::SYS_prctl as c_long,
-				PR_SET_SYSCALL_USER_DISPATCH as c_long,
-				action as c_long,
+				c_long::from(PR_SET_SYSCALL_USER_DISPATCH),
+				c_long::from(action),
 				0,
 				0,
 				selector_ptr as c_long,
@@ -272,9 +272,9 @@ pub mod functions {
 				libc::SYS_mmap as c_long,
 				addr as c_long,
 				length as c_long,
-				prot as c_long,
-				flags as c_long,
-				fd as c_long,
+				c_long::from(prot),
+				c_long::from(flags),
+				c_long::from(fd),
 				offset as c_long,
 			);
 			result as *mut c_void
@@ -302,7 +302,7 @@ pub mod functions {
 				libc::SYS_mprotect as c_long,
 				addr as c_long,
 				len as c_long,
-				prot as c_long,
+				c_long::from(prot),
 			) as c_int
 		}
 	}
@@ -330,7 +330,7 @@ pub mod functions {
 		unsafe {
 			let result = syscall2(
 				libc::SYS_arch_prctl as c_long,
-				ARCH_GET_GS as c_long,
+				c_long::from(ARCH_GET_GS),
 				&raw mut value as c_long,
 			);
 			assert_eq!(result, 0, "Failed to get GS base");
@@ -353,7 +353,13 @@ pub mod functions {
 	#[inline]
 	#[must_use]
 	pub unsafe fn set_gs_base(value: u64) -> c_int {
-		unsafe { syscall2(libc::SYS_arch_prctl as c_long, ARCH_SET_GS as c_long, value as c_long) as c_int }
+		unsafe {
+			syscall2(
+				libc::SYS_arch_prctl as c_long,
+				c_long::from(ARCH_SET_GS),
+				value as c_long,
+			) as c_int
+		}
 	}
 
 	/// Sets or gets the signal action for a specific signal.
@@ -380,7 +386,7 @@ pub mod functions {
 		unsafe {
 			syscall4(
 				libc::SYS_rt_sigaction as c_long,
-				signum as c_long,
+				c_long::from(signum),
 				act as c_long,
 				oldact as c_long,
 				sigsetsize as c_long,
@@ -412,7 +418,7 @@ pub mod functions {
 		unsafe {
 			syscall4(
 				libc::SYS_rt_sigprocmask as c_long,
-				how as c_long,
+				c_long::from(how),
 				set as c_long,
 				oldset as c_long,
 				sigsetsize as c_long,

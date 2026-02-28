@@ -19,8 +19,9 @@ pub fn init_logging() {
 	INIT.call_once(|| {
 		let filter = EnvFilter::try_from_default_env()
 			.or_else(|_| {
-				if let Ok(level) = std::env::var("LAZYPOLINE_DEBUG") {
-					match level.to_lowercase().as_str() {
+				std::env::var("LAZYPOLINE_DEBUG").map_or_else(
+					|_| Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn")),
+					|level| match level.to_lowercase().as_str() {
 						"trace" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=trace")),
 						"debug" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug")),
 						"info" => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=info")),
@@ -30,10 +31,8 @@ pub fn init_logging() {
 							Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=debug"))
 						},
 						_ => Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn")),
-					}
-				} else {
-					Ok::<EnvFilter, Box<dyn std::error::Error>>(EnvFilter::new("lazypoline=warn"))
-				}
+					},
+				)
 			})
 			.unwrap();
 
@@ -42,14 +41,11 @@ pub fn init_logging() {
 			.with(filter);
 
 		match registry.try_init() {
-			Ok(_) => {
+			Ok(()) => {
 				tracing::info!("Lazypoline logging initialized at level: {}", log_level());
 			},
 			Err(e) => {
-				eprintln!(
-					"Note: Could not initialize tracing (probably already initialized): {}",
-					e
-				);
+				eprintln!("Note: Could not initialize tracing (probably already initialized): {e}");
 			},
 		}
 	});

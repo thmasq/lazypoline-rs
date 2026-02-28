@@ -14,7 +14,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall0(num: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall0(num: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -36,7 +37,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall1(num: c_long, arg1: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall1(num: c_long, arg1: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -59,7 +61,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall2(num: c_long, arg1: c_long, arg2: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall2(num: c_long, arg1: c_long, arg2: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -83,7 +86,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall3(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall3(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -108,7 +112,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall4(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long, arg4: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall4(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long, arg4: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -134,7 +139,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall5(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long, arg4: c_long, arg5: c_long) -> c_long {
+#[must_use]
+pub unsafe fn syscall5(num: c_long, arg1: c_long, arg2: c_long, arg3: c_long, arg4: c_long, arg5: c_long) -> c_long {
 	let mut ret: c_long;
 	unsafe {
 		asm!(
@@ -161,7 +167,8 @@ use std::arch::asm;
 /// The caller must ensure that the system call number is valid
 /// and that any memory passed to the kernel is valid.
 #[inline]
-#[must_use] pub unsafe fn syscall6(
+#[must_use]
+pub unsafe fn syscall6(
 	num: c_long,
 	arg1: c_long,
 	arg2: c_long,

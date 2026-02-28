@@ -1,12 +1,11 @@
 //! Thread registry for lazypoline
 //!
 //! This module provides a framework-wide registry for tracking threads
-//! and their associated GSRelData pointers. It enables proper handling of
+//! and their associated `GSRelData` pointers. It enables proper handling of
 //! parent-child thread relationships, thread-local state, and cleanup.
 
 use crate::core::gsrel::GSRelData;
 use libc::pthread_t;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::thread::ThreadId;
@@ -27,7 +26,7 @@ pub struct ThreadInfo {
 	/// The parent thread's ID (if known)
 	pub parent_thread_id: Option<ThreadId>,
 
-	/// Pointer to the thread's GSRelData
+	/// Pointer to the thread's `GSRelData`
 	pub gsreldata: *mut GSRelData,
 
 	/// Creation time of the thread
@@ -48,7 +47,8 @@ unsafe impl Sync for ThreadInfo {}
 
 impl ThreadInfo {
 	/// Check if this is a thread (vs a process)
-	pub fn is_thread(&self) -> bool {
+	#[must_use]
+	pub const fn is_thread(&self) -> bool {
 		if let Some(flags) = self.clone_flags {
 			(flags & crate::ffi::CLONE_THREAD) != 0
 		} else {
@@ -58,7 +58,8 @@ impl ThreadInfo {
 	}
 
 	/// Check if this thread shares signal handlers with its parent
-	pub fn shares_signal_handlers(&self) -> bool {
+	#[must_use]
+	pub const fn shares_signal_handlers(&self) -> bool {
 		if let Some(flags) = self.clone_flags {
 			(flags & crate::ffi::CLONE_SIGHAND as u64) != 0
 		} else {
@@ -68,7 +69,8 @@ impl ThreadInfo {
 	}
 
 	/// Check if this is a vfork child
-	pub fn is_vfork_child(&self) -> bool {
+	#[must_use]
+	pub const fn is_vfork_child(&self) -> bool {
 		if let Some(flags) = self.clone_flags {
 			(flags & crate::ffi::CLONE_VFORK) != 0
 		} else {
@@ -80,7 +82,7 @@ impl ThreadInfo {
 /// Thread registry singleton
 ///
 /// This structure maintains a global registry of all threads and their
-/// associated GSRelData pointers for the entire framework.
+/// associated `GSRelData` pointers for the entire framework.
 pub struct ThreadRegistry {
 	/// Map of thread IDs to thread information
 	threads: RwLock<HashMap<ThreadId, Arc<ThreadInfo>>>,
@@ -110,7 +112,7 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `gsreldata` - Pointer to the thread's GSRelData
+	/// * `gsreldata` - Pointer to the thread's `GSRelData`
 	/// * `parent_thread_id` - Optional parent thread ID
 	/// * `clone_flags` - Optional clone flags used to create this thread
 	pub fn register_current_thread(
@@ -166,7 +168,7 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `gsreldata` - Pointer to the thread's GSRelData
+	/// * `gsreldata` - Pointer to the thread's `GSRelData`
 	/// * `clone_flags` - Clone flags used to create this thread
 	pub fn register_child_thread(&self, gsreldata: *mut GSRelData, clone_flags: u64) -> Arc<ThreadInfo> {
 		let parent_thread_id = std::thread::current().id();
@@ -244,9 +246,12 @@ impl ThreadRegistry {
 	///
 	/// Arc to the thread information, or None if not found
 	pub fn get_thread_info_by_pthread(&self, pthread_id: pthread_t) -> Option<Arc<ThreadInfo>> {
-		let pthread_map = self.pthread_map.read().unwrap();
-		let thread_id = pthread_map.get(&pthread_id)?;
-		self.get_thread_info(*thread_id)
+		let thread_id = {
+			let pthread_map = self.pthread_map.read().unwrap();
+			*pthread_map.get(&pthread_id)?
+		};
+
+		self.get_thread_info(thread_id)
 	}
 
 	/// Get information about the parent thread
@@ -259,9 +264,12 @@ impl ThreadRegistry {
 	///
 	/// Arc to the parent thread information, or None if not found
 	pub fn get_parent_thread_info(&self, thread_id: ThreadId) -> Option<Arc<ThreadInfo>> {
-		let child_parent_map = self.child_parent_map.read().unwrap();
-		let parent_id = child_parent_map.get(&thread_id)?;
-		self.get_thread_info(*parent_id)
+		let parent_id = {
+			let child_parent_map = self.child_parent_map.read().unwrap();
+			*child_parent_map.get(&thread_id)?
+		};
+
+		self.get_thread_info(parent_id)
 	}
 
 	/// Get information about the current thread's parent
@@ -274,53 +282,49 @@ impl ThreadRegistry {
 		self.get_parent_thread_info(thread_id)
 	}
 
-	/// Get the GSRelData for a thread
+	/// Get the `GSRelData` for a thread
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID to get GSRelData for
+	/// * `thread_id` - The thread ID to get `GSRelData` for
 	///
 	/// # Returns
 	///
-	/// Pointer to the GSRelData, or null if not found
+	/// Pointer to the `GSRelData`, or null if not found
 	pub fn get_gsreldata(&self, thread_id: ThreadId) -> *mut GSRelData {
-		match self.get_thread_info(thread_id) {
-			Some(info) => info.gsreldata,
-			None => std::ptr::null_mut(),
-		}
+		self.get_thread_info(thread_id)
+			.map_or_else(std::ptr::null_mut, |info| info.gsreldata)
 	}
 
-	/// Get the GSRelData for the current thread
+	/// Get the `GSRelData` for the current thread
 	///
 	/// # Returns
 	///
-	/// Pointer to the GSRelData, or null if not found
+	/// Pointer to the `GSRelData`, or null if not found
 	pub fn get_current_gsreldata(&self) -> *mut GSRelData {
 		let thread_id = std::thread::current().id();
 		self.get_gsreldata(thread_id)
 	}
 
-	/// Get the GSRelData for the parent thread
+	/// Get the `GSRelData` for the parent thread
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID whose parent's GSRelData to get
+	/// * `thread_id` - The thread ID whose parent's `GSRelData` to get
 	///
 	/// # Returns
 	///
-	/// Pointer to the parent's GSRelData, or null if not found
+	/// Pointer to the parent's `GSRelData`, or null if not found
 	pub fn get_parent_gsreldata(&self, thread_id: ThreadId) -> *mut GSRelData {
-		match self.get_parent_thread_info(thread_id) {
-			Some(info) => info.gsreldata,
-			None => std::ptr::null_mut(),
-		}
+		self.get_parent_thread_info(thread_id)
+			.map_or_else(std::ptr::null_mut, |info| info.gsreldata)
 	}
 
-	/// Get the GSRelData for the current thread's parent
+	/// Get the `GSRelData` for the current thread's parent
 	///
 	/// # Returns
 	///
-	/// Pointer to the parent's GSRelData, or null if not found
+	/// Pointer to the parent's `GSRelData`, or null if not found
 	pub fn get_current_parent_gsreldata(&self) -> *mut GSRelData {
 		let thread_id = std::thread::current().id();
 		self.get_parent_gsreldata(thread_id)
@@ -353,11 +357,9 @@ impl ThreadRegistry {
 
 		for (id, info) in threads.iter() {
 			let thread_type = if info.is_thread() { "Thread" } else { "Process" };
-			let parent_info = if let Some(parent_id) = info.parent_thread_id {
-				format!("parent: {:?}", parent_id)
-			} else {
-				"no parent".to_string()
-			};
+			let parent_info = info
+				.parent_thread_id
+				.map_or_else(|| "no parent".to_string(), |parent_id| format!("parent: {parent_id:?}"));
 
 			debug!(
 				"  {:?}: {} (pid: {}, {}, age: {:?})",
@@ -372,9 +374,10 @@ impl ThreadRegistry {
 }
 
 /// Global thread registry singleton
-static THREAD_REGISTRY: Lazy<ThreadRegistry> = Lazy::new(ThreadRegistry::new);
+static THREAD_REGISTRY: std::sync::LazyLock<ThreadRegistry> = std::sync::LazyLock::new(ThreadRegistry::new);
 
 /// Get the global thread registry
+#[must_use]
 pub fn registry() -> &'static ThreadRegistry {
 	&THREAD_REGISTRY
 }
@@ -386,7 +389,7 @@ pub fn registry() -> &'static ThreadRegistry {
 ///
 /// # Parameters
 ///
-/// * `gsreldata` - Pointer to the main thread's GSRelData
+/// * `gsreldata` - Pointer to the main thread's `GSRelData`
 pub fn init_with_main_thread(gsreldata: *mut GSRelData) {
 	let registry = registry();
 	registry.register_current_thread(gsreldata, None, None);

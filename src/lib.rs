@@ -30,6 +30,16 @@
 //! }
 //! ```
 
+#![allow(
+	clippy::cast_possible_wrap,
+	clippy::cast_sign_loss,
+	clippy::cast_possible_truncation,
+	clippy::missing_panics_doc,
+	clippy::missing_errors_doc,
+	clippy::missing_safety_doc,
+	clippy::cast_precision_loss
+)]
+
 pub mod core;
 pub mod ffi;
 pub mod interposer;

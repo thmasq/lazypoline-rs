@@ -64,7 +64,7 @@ impl Interposer {
 			// Initialize SUD first
 			tracing::info!("Initializing SUD...");
 			match crate::core::sud::init_sud() {
-				Ok(_) => tracing::info!("SUD initialized successfully"),
+				Ok(()) => tracing::info!("SUD initialized successfully"),
 				Err(e) => {
 					tracing::error!("Failed to initialize SUD: {}", e);
 					return Err(e);
@@ -86,7 +86,7 @@ impl Interposer {
 			if self.context.config.rewrite_to_zpoline {
 				tracing::info!("Initializing zpoline...");
 				match crate::core::zpoline::init_zpoline() {
-					Ok(_) => tracing::info!("Zpoline initialized successfully"),
+					Ok(()) => tracing::info!("Zpoline initialized successfully"),
 					Err(e) => {
 						tracing::error!("Failed to initialize zpoline: {}", e);
 						return Err(e);
@@ -97,7 +97,7 @@ impl Interposer {
 			// Now enable SUD with everything set up
 			tracing::info!("Enabling SUD...");
 			match crate::core::sud::enable_sud() {
-				Ok(_) => tracing::info!("SUD enabled successfully"),
+				Ok(()) => tracing::info!("SUD enabled successfully"),
 				Err(e) => {
 					tracing::error!("Failed to enable SUD: {}", e);
 					return Err(e);

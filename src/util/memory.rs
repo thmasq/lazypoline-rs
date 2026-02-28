@@ -10,7 +10,8 @@
 ///
 /// The page size in bytes
 #[inline]
-#[must_use] pub fn page_size() -> usize {
+#[must_use]
+pub fn page_size() -> usize {
 	unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
 }
 
@@ -47,7 +48,7 @@ pub fn page_align<T>(ptr: *mut T) -> *mut T {
 #[inline]
 pub fn is_page_aligned<T>(ptr: *const T) -> bool {
 	let page_size = page_size();
-	(ptr as usize) % page_size == 0
+	(ptr as usize).is_multiple_of(page_size)
 }
 
 /// Align a value to a page boundary
@@ -62,7 +63,8 @@ pub fn is_page_aligned<T>(ptr: *const T) -> bool {
 ///
 /// The aligned value
 #[inline]
-#[must_use] pub fn align_to_page(size: usize) -> usize {
+#[must_use]
+pub fn align_to_page(size: usize) -> usize {
 	let page_size = page_size();
 	(size + page_size - 1) & !(page_size - 1)
 }
@@ -79,6 +81,7 @@ pub fn is_page_aligned<T>(ptr: *const T) -> bool {
 ///
 /// The number of pages needed
 #[inline]
-#[must_use] pub fn pages_needed(size: usize) -> usize {
+#[must_use]
+pub fn pages_needed(size: usize) -> usize {
 	align_to_page(size) / page_size()
 }

@@ -3,6 +3,8 @@
 //! This module contains the implementation of the Syscall User Dispatch (SUD)
 //! mechanism, which is used to intercept system calls in the kernel.
 
+#![allow(clippy::struct_field_names)]
+
 use crate::core::gsrel::{GSRelData, set_privilege_level};
 use crate::core::signal::SignalHandlers;
 use crate::ffi::{PR_SYS_DISPATCH_OFF, PR_SYS_DISPATCH_ON, get_gs_base, set_syscall_user_dispatch};
@@ -40,7 +42,7 @@ impl SudState {
 	fn track_syscall_interception(&self) -> bool {
 		let intercept_count = self.syscall_interceptions.fetch_add(1, Ordering::Relaxed) + 1;
 		// Only log every 100th interception after the first 10 to avoid log spam
-		intercept_count <= 10 || intercept_count % 100 == 0
+		intercept_count <= 10 || intercept_count.is_multiple_of(100)
 	}
 
 	fn track_vdso_syscall(&self) {
@@ -102,7 +104,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	unsafe {
 		if crate::core::zpoline::REWRITE_TO_ZPOLINE {
 			// Cast with the correct mutability for the required functions
-			let syscall_addr = call_addr.cast::<u16>().offset(-1);
+			let syscall_addr = call_addr.cast::<u16>().sub(1);
 			let vdso = get_vdso_location();
 			let in_vdso = vdso.contains(call_addr.cast::<u8>());
 
@@ -154,6 +156,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	}
 
 	// Redirect to asm_syscall_hook
+	#[allow(clippy::items_after_statements)]
 	unsafe extern "C" {
 		fn asm_syscall_hook();
 	}
@@ -214,9 +217,9 @@ pub unsafe fn init_sud() -> Result<()> {
 	let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
 	act.sa_sigaction = handle_sigsys as *const () as usize;
 	act.sa_flags = SA_SIGINFO;
-	unsafe { libc::sigemptyset(&mut act.sa_mask) };
+	unsafe { libc::sigemptyset(&raw mut act.sa_mask) };
 
-	let result = unsafe { libc::sigaction(SIGSYS, &act, std::ptr::null_mut()) };
+	let result = unsafe { libc::sigaction(SIGSYS, &raw const act, std::ptr::null_mut()) };
 	if result != 0 {
 		return Err(InterposerError::SignalHandlerRegistrationFailed(format!(
 			"Failed to set up SIGSYS handler: {}",
@@ -227,7 +230,7 @@ pub unsafe fn init_sud() -> Result<()> {
 
 	// Verify the handler is properly registered
 	let mut oldact: libc::sigaction = unsafe { std::mem::zeroed() };
-	let result = unsafe { libc::sigaction(SIGSYS, std::ptr::null(), &mut oldact) };
+	let result = unsafe { libc::sigaction(SIGSYS, std::ptr::null(), &raw mut oldact) };
 	if result != 0 {
 		return Err(InterposerError::SignalHandlerRegistrationFailed(format!(
 			"Failed to verify SIGSYS handler: {}",
@@ -265,15 +268,18 @@ pub fn print_sud_stats() {
 	info!("  VDSO syscalls (not rewritten): {vdso_calls}");
 	info!("  Rewritten syscalls: {rewritten}");
 
-	if interceptions > 0 {
-		#[allow(clippy::cast_precision_loss)]
-		let vdso_percent = (vdso_calls * 10000 / interceptions) as f64 / 100.0;
-		#[allow(clippy::cast_precision_loss)]
-		let rewritten_percent = (rewritten * 10000 / interceptions) as f64 / 100.0;
-
+	if let (Some(vdso_percent), Some(rewritten_percent)) =
+		(percent(vdso_calls, interceptions), percent(rewritten, interceptions))
+	{
 		info!("  VDSO syscalls: {vdso_percent:.2}%");
 		info!("  Rewritten syscalls: {rewritten_percent:.2}%");
 	}
+}
+
+fn percent(part: usize, total: usize) -> Option<f64> {
+	part.checked_mul(10000)
+		.and_then(|v| v.checked_div(total))
+		.map(|v| v as f64 / 100.0)
 }
 
 /// Enable Syscall User Dispatch (SUD) for the current process.
@@ -301,7 +307,9 @@ pub unsafe fn enable_sud() -> Result<()> {
 
 	// Verify the selector address is accessible and has the right value
 	let selector = unsafe { *(selector_addr as *const u8) };
-	if selector != crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW {
+	if selector == crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW {
+		info!("sud: Current selector value: {} (ALLOW)", selector);
+	} else {
 		// Attempt to correct the value if it's wrong
 		unsafe {
 			*(selector_addr as *mut u8) = crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW;
@@ -310,11 +318,10 @@ pub unsafe fn enable_sud() -> Result<()> {
 			"sud: Corrected selector value to {} (ALLOW)",
 			crate::ffi::SYSCALL_DISPATCH_FILTER_ALLOW
 		);
-	} else {
-		info!("sud: Current selector value: {} (ALLOW)", selector);
 	}
 
 	// Enable SUD
+	#[allow(clippy::items_after_statements)]
 	match set_syscall_user_dispatch(PR_SYS_DISPATCH_ON, selector_addr as *const u8) {
 		Ok(()) => {
 			info!("sud: SUD enabled successfully");

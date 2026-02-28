@@ -34,7 +34,8 @@ pub struct AllowAllFilter;
 
 impl AllowAllFilter {
 	/// Create a new `AllowAllFilter`
-	#[must_use] pub const fn new() -> Self {
+	#[must_use]
+	pub const fn new() -> Self {
 		Self
 	}
 }
@@ -59,7 +60,8 @@ pub struct BlockAllFilter;
 
 impl BlockAllFilter {
 	/// Create a new `BlockAllFilter`
-	#[must_use] pub const fn new() -> Self {
+	#[must_use]
+	pub const fn new() -> Self {
 		Self
 	}
 }

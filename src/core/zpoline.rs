@@ -211,9 +211,8 @@ pub unsafe extern "C" fn zpoline_syscall_handler(
 	}
 
 	// Process the syscall by passing the context reference
-	let result = unsafe { crate::ffi::syscall_emulate(rax, &mut ctx, should_emulate) };
 
-	result
+	unsafe { crate::ffi::syscall_emulate(rax, &mut ctx, should_emulate) }
 }
 
 /// Rewrites a syscall instruction to use the zpoline mechanism.

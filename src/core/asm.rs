@@ -20,7 +20,7 @@ unsafe extern "C" {
 
 /// Sets up a new thread's syscall interposition state
 ///
-/// This function is called from assembly when a new thread is created via clone().
+/// This function is called from assembly when a new thread is created via `clone()`.
 /// It initializes the thread-local storage and state needed for syscall interposition.
 ///
 /// # Parameters
@@ -66,19 +66,19 @@ pub extern "C" fn setup_new_thread(clone_flags: u64) {
 			// Get the parent's signal handlers from the registry
 			let parent_gsreldata = thread_registry::registry().get_current_parent_gsreldata();
 
-			if !parent_gsreldata.is_null() {
-				unsafe {
-					let parent_signal_handlers = *(*parent_gsreldata).signal_handlers.get();
-					*(*gsreldata).signal_handlers.get() = parent_signal_handlers;
-					trace!("Copied parent signal handlers: {:p}", parent_signal_handlers);
-				}
-			} else {
+			if parent_gsreldata.is_null() {
 				// Fall back to creating new signal handlers
 				warn!("Could not get parent's GSRelData, creating new signal handlers");
 				let signal_handlers = unsafe { SignalHandlers::new() };
 				if !signal_handlers.is_null() {
 					unsafe { *(*gsreldata).signal_handlers.get() = signal_handlers };
 					trace!("Created new signal handlers at {:p}", signal_handlers);
+				}
+			} else {
+				unsafe {
+					let parent_signal_handlers = *(*parent_gsreldata).signal_handlers.get();
+					*(*gsreldata).signal_handlers.get() = parent_signal_handlers;
+					trace!("Copied parent signal handlers: {:p}", parent_signal_handlers);
 				}
 			}
 		} else {
@@ -106,8 +106,8 @@ pub extern "C" fn setup_new_thread(clone_flags: u64) {
 
 /// Sets up a vforked child process's syscall interposition state
 ///
-/// This function is called from assembly when a new process is created via vfork().
-/// vfork() is special because the child shares the parent's address space until exec()
+/// This function is called from assembly when a new process is created via `vfork()`.
+/// `vfork()` is special because the child shares the parent's address space until `exec()`
 /// is called, so we need to be careful about what state we modify.
 ///
 /// # Safety
@@ -277,6 +277,7 @@ pub extern "C" fn handle_clone_thread(a1: i64, a2: i64, a3: i64, a4: i64, a5: i6
 	// Perform the actual clone syscall
 	let result = unsafe { crate::syscall::syscall6(libc::SYS_clone, a1, a2, a3, a4, a5, a6) };
 
+	#[allow(clippy::comparison_chain)]
 	if result == 0 {
 		// This is the child process/thread
 		debug!("In child context after clone (tid=0)");

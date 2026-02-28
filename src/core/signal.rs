@@ -102,18 +102,19 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 
 	// Look up the thread in the registry to get its GSRelData
 	let registry = crate::core::thread_registry::registry();
-	let gsreldata = if let Some(thread_info) = registry.get_current_thread_info() {
-		thread_info.gsreldata
-	} else {
-		// Fall back to GS base if not in registry
-		let gs_base = unsafe { crate::ffi::get_gs_base() };
-		if gs_base != 0 {
-			gs_base as *mut GSRelData
-		} else {
-			tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
-			panic!("Failed to get GSRelData for current thread");
-		}
-	};
+	let gsreldata = registry.get_current_thread_info().map_or_else(
+		|| {
+			// Fall back to GS base if not in registry
+			let gs_base = unsafe { crate::ffi::get_gs_base() };
+			if gs_base != 0 {
+				gs_base as *mut GSRelData
+			} else {
+				tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
+				panic!("Failed to get GSRelData for current thread");
+			}
+		},
+		|thread_info| thread_info.gsreldata,
+	);
 
 	let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
 	if signal_handlers.is_null() {
@@ -167,7 +168,8 @@ impl SignalHandlers {
 			let dfl_handler_ptr = dfl_handler_uninit.as_mut_ptr();
 
 			// Initialize the handler field with SIG_DFL
-			(*dfl_handler_ptr).handler = mem::transmute(SIG_DFL);
+			(*dfl_handler_ptr).handler =
+				mem::transmute::<usize, unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)>(SIG_DFL);
 			(*dfl_handler_ptr).flags = 0;
 			(*dfl_handler_ptr).restorer = None;
 			(*dfl_handler_ptr).mask = mem::zeroed(); // sigset_t can be zeroed
@@ -188,11 +190,9 @@ impl SignalHandlers {
 			let should_inherit = {
 				let registry = crate::core::thread_registry::registry();
 				// Only inherit if we're not the main thread and the parent shares signal handlers
-				if let Some(thread_info) = registry.get_current_thread_info() {
+				registry.get_current_thread_info().is_some_and(|thread_info| {
 					thread_info.parent_thread_id.is_some() && thread_info.shares_signal_handlers()
-				} else {
-					false
-				}
+				})
 			};
 
 			if should_inherit {
@@ -209,9 +209,9 @@ impl SignalHandlers {
 							// Get the array inside the UnsafeCell
 							let parent_handlers = &*parent_app_handlers_ptr;
 
-							for i in 0..NSIG {
+							for (i, &handler) in parent_handlers.iter().enumerate().take(NSIG) {
 								// Copy each handler individually
-								std::ptr::write(app_handlers_ptr.add(i), parent_handlers[i]);
+								std::ptr::write(app_handlers_ptr.add(i), handler);
 							}
 
 							tracing::debug!("Inherited signal handlers from parent thread");
@@ -238,7 +238,10 @@ impl SignalHandlers {
 						let handler_ptr = handler_uninit.as_mut_ptr();
 
 						// Initialize handler fields
-						(*handler_ptr).handler = mem::transmute(act.sa_sigaction);
+						(*handler_ptr).handler = mem::transmute::<
+							usize,
+							unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+						>(act.sa_sigaction);
 						(*handler_ptr).flags = act.sa_flags as u64;
 						(*handler_ptr).restorer = None;
 						(*handler_ptr).mask = act.sa_mask;
@@ -246,7 +249,7 @@ impl SignalHandlers {
 						let handler = handler_uninit.assume_init();
 						std::ptr::write(app_handlers_ptr.add(i), handler);
 
-						if act.sa_sigaction == mem::transmute(SIG_DFL) {
+						if act.sa_sigaction == SIG_DFL {
 							// If this is a default handler, save it
 							dfl_handler = handler;
 						}
@@ -364,32 +367,7 @@ impl SignalHandlers {
 			}
 
 			if !newact.is_null() {
-				// Using get_kernel_sigaction and direct array manipulation
-				let app_handlers_ptr = self.app_handlers.get();
-				let new_kernel_act = unsafe { *newact };
-
-				// Create a MaybeUninit for the new handler
-				let mut new_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-				let new_handler_ptr = new_handler_uninit.as_mut_ptr();
-
-				// Initialize handler fields
-				unsafe {
-					(*new_handler_ptr).handler = mem::transmute::<
-						usize,
-						unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
-					>(new_kernel_act.sa_sigaction);
-					(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
-					(*new_handler_ptr).restorer = None;
-					(*new_handler_ptr).mask = new_kernel_act.sa_mask;
-				}
-				let new_handler = unsafe { new_handler_uninit.assume_init() };
-
-				unsafe {
-					(*app_handlers_ptr)[signo as usize] = new_handler;
-				}
-
-				// Propagate to other threads that share signal handlers with this thread
-				self.propagate_signal_handler_change(signo, &new_handler);
+				unsafe { self.update_app_handler(signo, *newact) };
 			}
 
 			return 0;
@@ -405,33 +383,7 @@ impl SignalHandlers {
 					unsafe { self.get_kernel_sigaction(signo as usize) }
 				};
 
-				// Update app_handlers directly
-				let app_handlers_ptr = self.app_handlers.get();
-				let new_kernel_act = unsafe { *newact };
-
-				// Create a MaybeUninit for the new handler
-				let mut new_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-				let new_handler_ptr = new_handler_uninit.as_mut_ptr();
-
-				// Initialize handler fields
-				unsafe {
-					(*new_handler_ptr).handler = mem::transmute::<
-						usize,
-						unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
-					>(new_kernel_act.sa_sigaction);
-					(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
-					(*new_handler_ptr).restorer = None;
-					(*new_handler_ptr).mask = new_kernel_act.sa_mask;
-				}
-
-				let new_handler = unsafe { new_handler_uninit.assume_init() };
-
-				unsafe {
-					(*app_handlers_ptr)[signo as usize] = new_handler;
-				}
-
-				// Propagate to other threads that share signal handlers with this thread
-				self.propagate_signal_handler_change(signo, &new_handler);
+				unsafe { self.update_app_handler(signo, *newact) };
 
 				if !oldact.is_null() {
 					unsafe { *oldact = old };
@@ -444,7 +396,7 @@ impl SignalHandlers {
 		newact_cpy.sa_flags |= SA_SIGINFO;
 		newact_cpy.sa_sigaction = wrap_signal_handler as *const () as usize;
 
-		let result = unsafe { rt_sigaction_raw(signo, &newact_cpy, oldact, 8) };
+		let result = unsafe { rt_sigaction_raw(signo, &raw const newact_cpy, oldact, 8) };
 		if result != 0 {
 			return i64::from(result);
 		}
@@ -456,15 +408,22 @@ impl SignalHandlers {
 			unsafe { self.get_kernel_sigaction(signo as usize) }
 		};
 
-		// Update app_handlers directly
-		let app_handlers_ptr = self.app_handlers.get();
-		let new_kernel_act = unsafe { *newact };
+		unsafe { self.update_app_handler(signo, *newact) };
 
-		// Create a MaybeUninit for the new handler
+		if !oldact.is_null() {
+			unsafe { *oldact = old };
+		}
+
+		0
+	}
+
+	/// Helper to update the application handler array and propagate the change
+	unsafe fn update_app_handler(&self, signo: c_int, new_kernel_act: sigaction) {
+		let app_handlers_ptr = self.app_handlers.get();
+
 		let mut new_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
 		let new_handler_ptr = new_handler_uninit.as_mut_ptr();
 
-		// Initialize handler fields
 		unsafe {
 			(*new_handler_ptr).handler = mem::transmute::<
 				usize,
@@ -474,20 +433,14 @@ impl SignalHandlers {
 			(*new_handler_ptr).restorer = None;
 			(*new_handler_ptr).mask = new_kernel_act.sa_mask;
 		}
+
 		let new_handler = unsafe { new_handler_uninit.assume_init() };
 
 		unsafe {
 			(*app_handlers_ptr)[signo as usize] = new_handler;
 		}
 
-		// Propagate to other threads that share signal handlers with this thread
-		self.propagate_signal_handler_change(signo, &new_handler);
-
-		if !oldact.is_null() {
-			unsafe { *oldact = old };
-		}
-
-		0
+		Self::propagate_signal_handler_change(signo, &new_handler);
 	}
 
 	/// Retrieves the application-specific handler for a given signal
@@ -542,6 +495,7 @@ impl SignalHandlers {
 	/// # Returns
 	///
 	/// The default disposition type for the specified signal
+	#[allow(clippy::match_same_arms)]
 	const fn get_default_behavior(signo: c_int) -> SigDispType {
 		match signo {
 			// Ignored signals
@@ -602,8 +556,8 @@ impl SignalHandlers {
 
 	/// Propagate signal handler changes to other threads that share signal handlers
 	///
-	/// When a thread that's part of a thread group (CLONE_THREAD) and shares signal handlers
-	/// (CLONE_SIGHAND) changes a signal handler, that change should be reflected in all
+	/// When a thread that's part of a thread group (`CLONE_THREAD`) and shares signal handlers
+	/// (`CLONE_SIGHAND`) changes a signal handler, that change should be reflected in all
 	/// other threads in the group.
 	///
 	/// # Parameters
@@ -615,12 +569,11 @@ impl SignalHandlers {
 	///
 	/// This method is called with the signal handler lock held, so it's safe to
 	/// modify the signal handlers.
-	fn propagate_signal_handler_change(&self, signo: c_int, handler: &KernelSigaction) {
+	fn propagate_signal_handler_change(signo: c_int, handler: &KernelSigaction) {
 		// Check if the current thread is part of a thread group
 		let registry = crate::core::thread_registry::registry();
-		let current_thread_info = match registry.get_current_thread_info() {
-			Some(info) => info,
-			None => return, // Not a registered thread, nothing to propagate
+		let Some(current_thread_info) = registry.get_current_thread_info() else {
+			return;
 		};
 
 		// Only propagate if this thread is part of a thread group and shares signal handlers
@@ -686,20 +639,17 @@ impl SignalHandlers {
 	/// A new `SignalHandlers` instance that is a copy of this one
 	#[must_use]
 	pub unsafe fn clone(&self) -> *mut Self {
+		let new_handlers = unsafe { libc::malloc(std::mem::size_of::<Self>()).cast::<Self>() };
+		assert!(!new_handlers.is_null(), "Failed to allocate SignalHandlers");
+
+		let dfl_handler = self.dfl_handler;
+		let mut app_handlers = [dfl_handler; NSIG];
+
+		let app_handlers_ptr = self.app_handlers.get();
+
+		unsafe { std::ptr::copy_nonoverlapping((*app_handlers_ptr).as_ptr(), app_handlers.as_mut_ptr(), NSIG) };
+
 		unsafe {
-			let new_handlers = libc::malloc(std::mem::size_of::<Self>()).cast::<Self>();
-			assert!(!new_handlers.is_null(), "Failed to allocate SignalHandlers");
-
-			// Copy the dfl_handler
-			let dfl_handler = self.dfl_handler;
-
-			// Copy the app_handlers
-			let mut app_handlers = [dfl_handler; NSIG];
-			let app_handlers_ptr = self.app_handlers.get();
-			for i in 0..NSIG {
-				app_handlers[i] = (*app_handlers_ptr)[i];
-			}
-
 			std::ptr::write(
 				new_handlers,
 				Self {
@@ -708,8 +658,8 @@ impl SignalHandlers {
 					lock: SpinLock::new(),
 				},
 			);
+		};
 
-			new_handlers
-		}
+		new_handlers
 	}
 }

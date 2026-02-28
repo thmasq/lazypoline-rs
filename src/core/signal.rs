@@ -439,8 +439,6 @@ impl SignalHandlers {
 		unsafe {
 			(*app_handlers_ptr)[signo as usize] = new_handler;
 		}
-
-		Self::propagate_signal_handler_change(signo, &new_handler);
 	}
 
 	/// Retrieves the application-specific handler for a given signal
@@ -552,84 +550,6 @@ impl SignalHandlers {
 	fn is_terminating_sig(signo: c_int) -> bool {
 		let behavior = Self::get_default_behavior(signo);
 		behavior == SigDispType::Term || behavior == SigDispType::Core
-	}
-
-	/// Propagate signal handler changes to other threads that share signal handlers
-	///
-	/// When a thread that's part of a thread group (`CLONE_THREAD`) and shares signal handlers
-	/// (`CLONE_SIGHAND`) changes a signal handler, that change should be reflected in all
-	/// other threads in the group.
-	///
-	/// # Parameters
-	///
-	/// * `signo` - The signal number
-	/// * `handler` - The new handler
-	///
-	/// # Safety
-	///
-	/// This method is called with the signal handler lock held, so it's safe to
-	/// modify the signal handlers.
-	fn propagate_signal_handler_change(signo: c_int, handler: &KernelSigaction) {
-		// Check if the current thread is part of a thread group
-		let registry = crate::core::thread_registry::registry();
-		let Some(current_thread_info) = registry.get_current_thread_info() else {
-			return;
-		};
-
-		// Only propagate if this thread is part of a thread group and shares signal handlers
-		if !current_thread_info.is_thread() || !current_thread_info.shares_signal_handlers() {
-			return;
-		}
-
-		// Get all threads in the registry
-		let all_thread_info = registry.all_thread_info();
-
-		// Current thread's process ID - threads in the same group have the same process ID
-		let current_pid = current_thread_info.process_id;
-
-		// Propagate to all threads in the same process group that share signal handlers
-		for thread_info in all_thread_info {
-			// Skip self
-			if std::ptr::eq(thread_info.gsreldata, current_thread_info.gsreldata) {
-				continue;
-			}
-
-			// Only propagate to threads in the same process group
-			if thread_info.process_id != current_pid {
-				continue;
-			}
-
-			// Only propagate to threads that share signal handlers
-			if !thread_info.is_thread() || !thread_info.shares_signal_handlers() {
-				continue;
-			}
-
-			// Get the thread's signal handlers
-			let gsreldata = thread_info.gsreldata;
-			if gsreldata.is_null() {
-				continue;
-			}
-
-			let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
-			if signal_handlers.is_null() {
-				continue;
-			}
-
-			// Update the signal handler
-			// Note: this is safe because we hold the lock on *our* signal handlers,
-			// and the thread shares signal handlers with us, so we're effectively
-			// operating on the same memory
-			unsafe {
-				let app_handlers_ptr = (*signal_handlers).app_handlers.get();
-				(*app_handlers_ptr)[signo as usize] = *handler;
-			}
-
-			tracing::trace!(
-				"Propagated signal handler change for signal {} to thread {:?}",
-				signo,
-				thread_info.thread_id
-			);
-		}
 	}
 
 	/// Creates a deep copy of these signal handlers

@@ -133,7 +133,7 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 	unsafe { *stack_bottom = *gregs.add(libc::REG_RIP as usize) };
 
 	// Change RIP to point to our trampoline
-	unsafe { *gregs.add(libc::REG_RIP as usize) = restore_selector_trampoline as i64 };
+	unsafe { *gregs.add(libc::REG_RIP as usize) = restore_selector_trampoline as *const () as i64 };
 
 	let sigreturn_stack_current = unsafe { (*gsreldata).sigreturn_stack_current.get() };
 	unsafe { *(*sigreturn_stack_current) = selector_on_signal_entry };
@@ -442,7 +442,7 @@ impl SignalHandlers {
 
 		let mut newact_cpy = unsafe { *newact };
 		newact_cpy.sa_flags |= SA_SIGINFO;
-		newact_cpy.sa_sigaction = wrap_signal_handler as usize;
+		newact_cpy.sa_sigaction = wrap_signal_handler as *const () as usize;
 
 		let result = unsafe { rt_sigaction_raw(signo, &newact_cpy, oldact, 8) };
 		if result != 0 {

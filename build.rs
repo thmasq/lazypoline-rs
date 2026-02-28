@@ -19,8 +19,6 @@ fn main() {
 		build.flag("-g");
 	}
 
-	build.static_flag(true).compile("asm_syscall_hook");
-
 	// Set CPU features
 	println!("cargo:rustc-env=RUSTFLAGS=-C target-feature=+fsgsbase");
 

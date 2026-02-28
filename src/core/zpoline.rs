@@ -121,7 +121,7 @@ pub unsafe fn init_zpoline() -> Result<()> {
 	zeropage_slice[NUM_SYSCALLS + 0x2] = 0xb8;
 
 	// 64-bit address of asm_syscall_hook, byte by byte
-	let hook_addr = asm_syscall_hook as usize;
+	let hook_addr = asm_syscall_hook as *const () as usize;
 	debug!("zpoline: asm_syscall_hook at address 0x{hook_addr:x}");
 
 	// Store hook address as individual bytes
@@ -210,19 +210,8 @@ pub unsafe extern "C" fn zpoline_syscall_handler(
 		return 0;
 	}
 
-	// Get the global interposer context
-	// In a real implementation, we would retrieve this from a global state
-	// For now, we'll forward to our emulation function
-
-	// Process the syscall
-	let result = unsafe { crate::ffi::syscall_emulate(rax, rdi, rsi, rdx, r10, r8, r9, should_emulate) };
-
-	// Set the should_emulate flag in the context if necessary
-	if should_emulate.is_null() {
-		ctx.should_emulate = false;
-	} else {
-		ctx.should_emulate = unsafe { *should_emulate } != 0;
-	}
+	// Process the syscall by passing the context reference
+	let result = unsafe { crate::ffi::syscall_emulate(rax, &mut ctx, should_emulate) };
 
 	result
 }

@@ -475,54 +475,44 @@ pub mod utils {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall_emulate(
 	syscall_no: i64,
-	a1: i64,
-	a2: i64,
-	a3: i64,
-	a4: i64,
-	a5: i64,
-	a6: i64,
+	ctx: &mut crate::syscall::SyscallContext,
 	should_emulate: *mut u64,
 ) -> i64 {
 	// Debugging - uncomment if needed to trace specific syscalls
 	/*
 	if syscall_no == libc::SYS_open || syscall_no == libc::SYS_read {
-		if a1 != 0 {
-			let path = unsafe { std::ffi::CStr::from_ptr(a1 as *const i8) }.to_string_lossy();
+		if ctx.args.rdi != 0 {
+			let path = unsafe { std::ffi::CStr::from_ptr(ctx.args.rdi as *const i8) }.to_string_lossy();
 			tracing::debug!("syscall_emulate: syscall={}, path={}, args={}, {}, {}, {}, {}",
-				syscall_no, path, a1, a2, a3, a4, a5);
+				syscall_no, path, ctx.args.rdi, ctx.args.rsi, ctx.args.rdx, ctx.args.r10, ctx.args.r8);
 		} else {
 			tracing::debug!("syscall_emulate: syscall={}, args={}, {}, {}, {}, {}",
-				syscall_no, a1, a2, a3, a4, a5);
+				syscall_no, ctx.args.rdi, ctx.args.rsi, ctx.args.rdx, ctx.args.r10, ctx.args.r8);
 		}
 	}
 	*/
 
 	match crate::interposer::get_active_interposer() {
 		Some(interposer) => {
-			let syscall = crate::syscall::syscall_from_number(syscall_no).unwrap_or(crate::syscall::Syscall::Unknown);
-
-			let args =
-				crate::syscall::SyscallArgs::new(a1 as u64, a2 as u64, a3 as u64, a4 as u64, a5 as u64, a6 as u64);
-
-			let mut ctx = crate::syscall::SyscallContext {
-				syscall,
-				args,
-				rip: 0, // We don't have this information here
-				should_emulate: false,
-			};
-
-			let action = interposer.process_syscall(&mut ctx);
+			let action = interposer.process_syscall(ctx);
 
 			match action {
 				crate::syscall::SyscallAction::Allow => unsafe {
-					crate::syscall::syscall6(syscall_no, a1, a2, a3, a4, a5, a6)
+					crate::syscall::syscall6(
+						syscall_no,
+						ctx.args.rdi as i64,
+						ctx.args.rsi as i64,
+						ctx.args.rdx as i64,
+						ctx.args.r10 as i64,
+						ctx.args.r8 as i64,
+						ctx.args.r9 as i64,
+					)
 				},
 				crate::syscall::SyscallAction::Block(result) => result,
 				crate::syscall::SyscallAction::Emulate => {
 					if !should_emulate.is_null() {
 						unsafe { *should_emulate = 1 };
 					}
-					ctx.should_emulate = true;
 					syscall_no
 				},
 				crate::syscall::SyscallAction::Modify(new_args) => unsafe {
@@ -538,6 +528,16 @@ pub unsafe extern "C" fn syscall_emulate(
 				},
 			}
 		},
-		None => unsafe { crate::syscall::syscall6(syscall_no, a1, a2, a3, a4, a5, a6) },
+		None => unsafe {
+			crate::syscall::syscall6(
+				syscall_no,
+				ctx.args.rdi as i64,
+				ctx.args.rsi as i64,
+				ctx.args.rdx as i64,
+				ctx.args.r10 as i64,
+				ctx.args.r8 as i64,
+				ctx.args.r9 as i64,
+			)
+		},
 	}
 }

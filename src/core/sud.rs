@@ -157,7 +157,7 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	unsafe extern "C" {
 		fn asm_syscall_hook();
 	}
-	unsafe { *gregs.add(libc::REG_RIP as usize) = asm_syscall_hook as i64 };
+	unsafe { *gregs.add(libc::REG_RIP as usize) = asm_syscall_hook as *const () as i64 };
 
 	debug!("sigsys: Handler completed, redirecting to asm_syscall_hook");
 }
@@ -212,7 +212,7 @@ pub unsafe fn init_sud() -> Result<()> {
 
 	// Set up SIGSYS handler
 	let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
-	act.sa_sigaction = handle_sigsys as usize;
+	act.sa_sigaction = handle_sigsys as *const () as usize;
 	act.sa_flags = SA_SIGINFO;
 	unsafe { libc::sigemptyset(&mut act.sa_mask) };
 
@@ -235,7 +235,7 @@ pub unsafe fn init_sud() -> Result<()> {
 		)));
 	}
 
-	if oldact.sa_sigaction != handle_sigsys as usize {
+	if oldact.sa_sigaction != handle_sigsys as *const () as usize {
 		return Err(InterposerError::SignalHandlerRegistrationFailed(format!(
 			"SIGSYS handler mismatch: expected {:p}, got 0x{:x}",
 			handle_sigsys as *mut c_void, oldact.sa_sigaction

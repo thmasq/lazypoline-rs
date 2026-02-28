@@ -94,6 +94,20 @@ impl InterposerContext {
 			stats.increment(ctx.syscall);
 		}
 
+		// MANDATORY EMULATION OVERRIDE:
+		// These syscalls alter the stack pointer or execution context severely.
+		// Executing them inline via C-ABI will crash the process/thread.
+		if matches!(
+			ctx.syscall,
+			crate::syscall::Syscall::clone | crate::syscall::Syscall::vfork | crate::syscall::Syscall::rt_sigreturn
+		) {
+			tracing::debug!(
+				"Forcing emulation for context-switching syscall: {}",
+				ctx.syscall.name()
+			);
+			return crate::syscall::SyscallAction::Emulate;
+		}
+
 		// Check if the syscall is in a safe list that should always be allowed
 		// to prevent deadlocks or system crashes
 		if is_critical_syscall(ctx.syscall) {
@@ -162,7 +176,6 @@ const fn is_critical_syscall(syscall: crate::syscall::Syscall) -> bool {
 			| crate::syscall::Syscall::arch_prctl
 			| crate::syscall::Syscall::rt_sigaction
 			| crate::syscall::Syscall::rt_sigprocmask
-			| crate::syscall::Syscall::rt_sigreturn
 			| crate::syscall::Syscall::prctl
 	)
 }

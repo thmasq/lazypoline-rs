@@ -51,7 +51,7 @@ pub mod constants {
 // Types for syscall interposition
 pub mod types {
 	use std::arch::asm;
-	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	/// Represents the signal information structure for SIGSYS signals.
 	///
@@ -92,7 +92,7 @@ pub mod types {
 	/// requiring operating system support. It should be used only for short
 	/// critical sections as it performs busy waiting.
 	pub struct SpinLock {
-		lock: AtomicBool,
+		owner: AtomicUsize,
 	}
 
 	impl Default for SpinLock {
@@ -110,7 +110,7 @@ pub mod types {
 		#[must_use]
 		pub const fn new() -> Self {
 			Self {
-				lock: AtomicBool::new(false),
+				owner: AtomicUsize::new(0),
 			}
 		}
 
@@ -119,8 +119,26 @@ pub mod types {
 		/// This function will spin (busy-wait) until the lock becomes available.
 		/// It implements a pause instruction to reduce CPU contention.
 		pub fn lock(&self) {
-			while self.lock.swap(true, Ordering::Acquire) {
-				while self.lock.load(Ordering::Relaxed) {
+			// pthread_self() is async-signal-safe and does not issue any syscalls
+			let tid = unsafe { libc::pthread_self() } as usize;
+
+			if self.owner.load(Ordering::Relaxed) == tid {
+				// If a thread tries to acquire a lock it already owns, it likely
+				// bypassed the SpinLockGuard drop (e.g., via longjmp out of a signal handler).
+				// We abort here to prevent a silent infinite deadlock loop.
+				eprintln!(
+					"lazypoline: SpinLock deadlock detected! Thread already owns the lock. Did the application longjmp out of a signal handler?"
+				);
+				std::process::abort();
+			}
+
+			// Attempt to acquire the lock
+			while self
+				.owner
+				.compare_exchange_weak(0, tid, Ordering::Acquire, Ordering::Relaxed)
+				.is_err()
+			{
+				while self.owner.load(Ordering::Relaxed) != 0 {
 					unsafe { asm!("pause", options(nomem, nostack)) };
 				}
 			}
@@ -138,7 +156,16 @@ pub mod types {
 		/// Generally, you should prefer using `SpinLockGuard` instead of manually
 		/// calling `lock` and `unlock`.
 		pub fn unlock(&self) {
-			self.lock.store(false, Ordering::Release);
+			let tid = unsafe { libc::pthread_self() } as usize;
+			let prev = self.owner.swap(0, Ordering::Release);
+
+			if prev != tid && prev != 0 {
+				// Lock was released by a thread that didn't acquire it.
+				// Restore the original owner and abort.
+				self.owner.store(prev, Ordering::Release);
+				eprintln!("lazypoline: SpinLock unlocked by a thread that does not own it!");
+				std::process::abort();
+			}
 		}
 	}
 

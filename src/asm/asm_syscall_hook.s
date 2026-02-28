@@ -118,15 +118,16 @@ asm_syscall_hook:
     xorq %r12, %r12
     pushq %r12 # Make room for `should_emulate` (false by default)
     leaq 0x0(%rsp), %r12 # &should_emulate -> r12
+    subq $8, %rsp
     pushq %r12  # &should_emulate as last arg of zpoline_syscall_handler
-    pushq 8(%rbp) # Address of instruction after rewritten syscall
+    pushq 16(%rbp) # Address of instruction after rewritten syscall
     pushq %rax
 
     # Call the Rust zpoline_syscall_handler function
     callq zpoline_syscall_handler
     # rax now contains the syscall return value
 
-    addq $24, %rsp # Discard the pushed rax, rip_after_syscall and &should_emulate
+    addq $32, %rsp # Discard the pushed rax, rip_after_syscall and &should_emulate
     popq %r12 # should_emulate -> r12
     
     teardown_c_stack

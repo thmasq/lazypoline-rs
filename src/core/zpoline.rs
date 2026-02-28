@@ -235,13 +235,20 @@ pub unsafe extern "C" fn zpoline_syscall_handler(
 pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 	debug!("zpoline: Rewriting syscall at address {syscall_addr:p}");
 
-	// Convert to usize for alignment calculation, then back to pointer type
-	let syscall_page_addr = align_down(syscall_addr as usize, 0x1000);
+	let syscall_addr_usize = syscall_addr as usize;
+	let syscall_page_addr = align_down(syscall_addr_usize, 0x1000);
 	let syscall_page = syscall_page_addr as *mut c_void;
+
+	// Check if the 2-byte instruction spans a page boundary
+	let mprotect_len = if (syscall_addr_usize % 0x1000) == 0xFFF {
+		0x2000
+	} else {
+		0x1000
+	};
 
 	let _guard = SpinLockGuard::new(&REWRITE_LOCK);
 
-	if unsafe { *syscall_addr } == 0xD0FF {
+	if unsafe { std::ptr::read_unaligned(syscall_addr) } == 0xD0FF {
 		debug!("zpoline: Syscall already rewritten, skipping");
 		return;
 	}
@@ -253,7 +260,7 @@ pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 
 	debug!("zpoline: Setting page permissions to allow writing");
 
-	let result = unsafe { mprotect_raw(syscall_page, 0x1000, perms) };
+	let result = unsafe { mprotect_raw(syscall_page, mprotect_len, perms) };
 	if result != 0 {
 		error!(
 			"zpoline: Error: Failed to make syscall page writable: {}",
@@ -265,18 +272,18 @@ pub unsafe fn rewrite_syscall_inst(syscall_addr: *mut u16) {
 	trace!(
 		"zpoline: Original instruction at {:p}: 0x{:04x}",
 		syscall_addr,
-		unsafe { *syscall_addr }
+		unsafe { std::ptr::read_unaligned(syscall_addr) }
 	);
 
 	// Rewrite syscall (0x0F05) to call-near [rax+0] (0xD0FF)
-	unsafe { *syscall_addr = 0xD0FF };
+	unsafe { std::ptr::write_unaligned(syscall_addr, 0xD0FF) };
 
 	debug!("zpoline: Instruction rewritten to 0xD0FF (call-near [rax+0])");
 
 	// Restore original permissions if not in compatibility mode
 	if !COMPAT_NONDEP_APP {
 		debug!("zpoline: Restoring page permissions");
-		let result = unsafe { mprotect_raw(syscall_page, 0x1000, PROT_READ | PROT_EXEC) };
+		let result = unsafe { mprotect_raw(syscall_page, mprotect_len, PROT_READ | PROT_EXEC) };
 		if result != 0 {
 			error!(
 				"zpoline: Error: Failed to restore syscall page permissions: {}",

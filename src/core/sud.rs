@@ -217,7 +217,7 @@ pub unsafe fn init_sud() -> Result<()> {
 	let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
 	act.sa_sigaction = handle_sigsys as *const () as usize;
 	act.sa_flags = SA_SIGINFO;
-	unsafe { libc::sigemptyset(&raw mut act.sa_mask) };
+	unsafe { libc::sigfillset(&raw mut act.sa_mask) };
 
 	let result = unsafe { libc::sigaction(SIGSYS, &raw const act, std::ptr::null_mut()) };
 	if result != 0 {

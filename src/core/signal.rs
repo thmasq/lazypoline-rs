@@ -4,17 +4,22 @@
 //! for handling the SIGSYS signal used by Syscall User Dispatch (SUD).
 
 use crate::core::gsrel::{BlockScope, GSRelData, get_privilege_level, set_privilege_level};
-use crate::ffi::{SpinLock, SpinLockGuard, rt_sigaction_raw};
+use crate::ffi::rt_sigaction_raw;
 use libc::{SA_SIGINFO, SIG_DFL, SIG_IGN, SIGSYS, c_int, c_void, sigaction, siginfo_t, sigset_t, ucontext_t};
 use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
 use std::ptr::null;
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 /// Flag indicating that a signal is not supported
 const SA_UNSUPPORTED: i32 = 0x0000_0400;
 
 /// The maximum number of signals supported by the system
 const NSIG: usize = 64;
+
+/// Capacity of the internal async-signal-safe memory pool
+const POOL_SIZE: usize = 1024;
+const POOL_BITMAP_WORDS: usize = POOL_SIZE / 64;
 
 /// Represents a kernel-level signal action structure
 ///
@@ -35,6 +40,15 @@ pub struct KernelSigaction {
 
 	/// Signal mask to apply during handler execution
 	pub mask: sigset_t,
+}
+
+/// A node in the lock-free memory pool
+/// Padded and aligned to 64 bytes to prevent false sharing of cache lines across threads
+#[repr(C)]
+#[repr(align(64))]
+pub struct PoolNode {
+	pub data: KernelSigaction,
+	pub next_retired: AtomicPtr<PoolNode>,
 }
 
 /// Represents the different types of default signal dispositions
@@ -65,9 +79,19 @@ pub struct SignalHandlers {
 	/// The default signal handler
 	dfl_handler: KernelSigaction,
 	/// Array of application-specific signal handlers
-	app_handlers: UnsafeCell<[KernelSigaction; NSIG]>,
-	/// Lock to synchronize access to the handler array
-	lock: SpinLock,
+	app_handlers: [AtomicPtr<PoolNode>; NSIG],
+	/// Bitmap tracking which slots in the pool are currently allocated (1 = allocated, 0 = free)
+	bitmap: [AtomicU64; POOL_BITMAP_WORDS],
+	/// Pre-allocated blocks of memory for KernelSigaction nodes
+	pool: [UnsafeCell<PoolNode>; POOL_SIZE],
+	/// Hazard Pointers array. Threads announce which node they are reading to protect it from
+	/// reclamation.
+	hazard_pointers: [AtomicPtr<PoolNode>; POOL_SIZE],
+	/// Tracks the Thread Key (typically the GSRelData memory address) that permanently owns the
+	/// hazard slot
+	hazard_owners: [AtomicUsize; POOL_SIZE],
+	/// Lock-free stack of old pointers waiting to be returned to the pool
+	retired_head: AtomicPtr<PoolNode>,
 }
 
 // SignalHandlers can be shared across threads safely
@@ -122,7 +146,11 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 		panic!("No signal handlers found for current thread");
 	}
 
-	unsafe { (*signal_handlers).invoke_app_specific_handler(signo, info, context) };
+	// Extract the O(1) cache requirements for the hazard pointers
+	let thread_key = gsreldata as usize;
+	let cache_ptr = unsafe { (*gsreldata).hazard_slot_idx.get() };
+
+	unsafe { (*signal_handlers).invoke_app_specific_handler(signo, info, context, thread_key, cache_ptr) };
 
 	// Verify RSP wasn't modified
 	assert_eq!(rsp, unsafe { *gregs.add(libc::REG_RSP as usize) });
@@ -160,31 +188,19 @@ impl SignalHandlers {
 	#[must_use]
 	pub unsafe fn new() -> *mut Self {
 		unsafe {
-			let handlers = libc::malloc(std::mem::size_of::<Self>()).cast::<Self>();
+			let handlers = libc::calloc(1, std::mem::size_of::<Self>()).cast::<Self>();
 			assert!(!handlers.is_null(), "Failed to allocate SignalHandlers");
 
 			// Create a MaybeUninit for dfl_handler
 			let mut dfl_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-			let dfl_handler_ptr = dfl_handler_uninit.as_mut_ptr();
+			let dfl_ptr = dfl_handler_uninit.as_mut_ptr();
+			(*dfl_ptr).handler = mem::transmute(SIG_DFL);
+			(*dfl_ptr).flags = 0;
+			(*dfl_ptr).restorer = None;
+			(*dfl_ptr).mask = mem::zeroed();
+			let dfl_handler = dfl_handler_uninit.assume_init();
 
-			// Initialize the handler field with SIG_DFL
-			(*dfl_handler_ptr).handler =
-				mem::transmute::<usize, unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)>(SIG_DFL);
-			(*dfl_handler_ptr).flags = 0;
-			(*dfl_handler_ptr).restorer = None;
-			(*dfl_handler_ptr).mask = mem::zeroed(); // sigset_t can be zeroed
-
-			let mut dfl_handler = dfl_handler_uninit.assume_init();
-
-			// Create a MaybeUninit array for app_handlers
-			let mut app_handlers_uninit: MaybeUninit<[KernelSigaction; NSIG]> = MaybeUninit::uninit();
-			let app_handlers_ptr = app_handlers_uninit.as_mut_ptr().cast::<KernelSigaction>();
-
-			// Initialize each element in the array
-			for i in 0..NSIG {
-				// Initialize each handler with the default handler
-				std::ptr::write(app_handlers_ptr.add(i), dfl_handler);
-			}
+			std::ptr::write(std::ptr::addr_of_mut!((*handlers).dfl_handler), dfl_handler);
 
 			// Check if this is a new thread that should inherit signal handlers
 			let should_inherit = {
@@ -204,19 +220,23 @@ impl SignalHandlers {
 						// Get the parent's signal handlers
 						let parent_signal_handlers = *(*parent_gsreldata).signal_handlers.get();
 						if !parent_signal_handlers.is_null() {
-							// Copy the parent's app_handlers - we need to copy each element individually
-							let parent_app_handlers_ptr = (*parent_signal_handlers).app_handlers.get();
-							// Get the array inside the UnsafeCell
-							let parent_handlers = &*parent_app_handlers_ptr;
+							// We need to fetch the parent's handlers using their thread key
+							let parent_key = parent_gsreldata as usize;
+							let parent_cache_ptr = (*parent_gsreldata).hazard_slot_idx.get();
 
-							for (i, &handler) in parent_handlers.iter().enumerate().take(NSIG) {
-								// Copy each handler individually
-								std::ptr::write(app_handlers_ptr.add(i), handler);
+							for i in 0..NSIG {
+								let handler_copy =
+									(*parent_signal_handlers).get_app_handler(i, parent_key, parent_cache_ptr);
+
+								let node = (*handlers).alloc_node();
+								(*node).data = handler_copy;
+								(*node).next_retired = AtomicPtr::new(std::ptr::null_mut());
+
+								(*handlers).app_handlers[i].store(node, Ordering::Relaxed);
 							}
 
 							tracing::debug!("Inherited signal handlers from parent thread");
-							// Also copy the default handler
-							dfl_handler = (*parent_signal_handlers).dfl_handler;
+							(*handlers).dfl_handler = (*parent_signal_handlers).dfl_handler;
 						}
 					}
 				}
@@ -230,75 +250,203 @@ impl SignalHandlers {
 
 					let mut act: MaybeUninit<sigaction> = MaybeUninit::uninit();
 					let result = rt_sigaction_raw(i as c_int, null(), act.as_mut_ptr(), 8);
+
+					let node = (*handlers).alloc_node();
+					(*node).next_retired = AtomicPtr::new(std::ptr::null_mut());
+
 					if result == 0 {
 						let act = act.assume_init();
-
-						// Create a MaybeUninit for this handler
-						let mut handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-						let handler_ptr = handler_uninit.as_mut_ptr();
-
-						// Initialize handler fields
-						(*handler_ptr).handler = mem::transmute::<
-							usize,
-							unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
-						>(act.sa_sigaction);
-						(*handler_ptr).flags = act.sa_flags as u64;
-						(*handler_ptr).restorer = None;
-						(*handler_ptr).mask = act.sa_mask;
-
-						let handler = handler_uninit.assume_init();
-						std::ptr::write(app_handlers_ptr.add(i), handler);
+						(*node).data.handler = mem::transmute(act.sa_sigaction);
+						(*node).data.flags = act.sa_flags as u64;
+						(*node).data.restorer = None;
+						(*node).data.mask = act.sa_mask;
 
 						if act.sa_sigaction == SIG_DFL {
-							// If this is a default handler, save it
-							dfl_handler = handler;
+							(*handlers).dfl_handler = (*node).data;
 						}
+					} else {
+						(*node).data = dfl_handler;
 					}
+
+					(*handlers).app_handlers[i].store(node, Ordering::Relaxed);
 				}
 			}
-
-			let app_handlers = app_handlers_uninit.assume_init();
-
-			std::ptr::write(
-				handlers,
-				Self {
-					dfl_handler,
-					app_handlers: UnsafeCell::new(app_handlers),
-					lock: SpinLock::new(),
-				},
-			);
 
 			tracing::debug!("Created signal handlers at {:p}", handlers);
 			handlers
 		}
 	}
 
-	/// Invokes the application-specific handler for a given signal
-	///
-	/// # Arguments
-	///
-	/// * `sig` - The signal number
-	/// * `info` - Pointer to the signal information structure
-	/// * `context` - Pointer to the signal context
-	///
-	/// # Safety
-	///
-	/// This function is unsafe because it:
-	/// - Dereferences raw pointers
-	/// - Calls an arbitrary function pointer provided by the application
-	/// - Assumes the signal handlers table is properly initialized
-	pub unsafe fn invoke_app_specific_handler(&self, sig: c_int, info: *mut siginfo_t, context: *mut c_void) {
-		let _guard = SpinLockGuard::new(&self.lock);
-		let app_handler = unsafe { self.get_app_handler(sig as usize) };
+	/// Claims a node from the wait-free memory pool via atomic bitwise scanning
+	unsafe fn alloc_node(&self) -> *mut PoolNode {
+		for i in 0..POOL_BITMAP_WORDS {
+			let mut current = self.bitmap[i].load(Ordering::Relaxed);
+			loop {
+				if current == u64::MAX {
+					break;
+				}
+
+				let tz = current.trailing_ones() as usize;
+				let new_val = current | (1 << tz);
+
+				match self.bitmap[i].compare_exchange_weak(current, new_val, Ordering::AcqRel, Ordering::Relaxed) {
+					Ok(_) => {
+						let idx = i * 64 + tz;
+						return self.pool[idx].get();
+					},
+					Err(val) => current = val,
+				}
+			}
+		}
+		panic!("SignalHandlers memory pool exhausted (over 1024 active handlers)");
+	}
+
+	/// Returns a node to the wait-free memory pool by clearing its bit
+	unsafe fn free_node(&self, ptr: *mut PoolNode) {
+		let base = self.pool.as_ptr() as *const PoolNode;
+		let offset = unsafe { ptr.offset_from(base) };
+		debug_assert!(offset >= 0 && (offset as usize) < POOL_SIZE);
+
+		let offset = offset as usize;
+		let i = offset / 64;
+		let bit = offset % 64;
+		self.bitmap[i].fetch_and(!(1 << bit), Ordering::Release);
+	}
+
+	/// Finds the thread's owned hazard slot in O(1) time if cached,
+	/// otherwise falls back to O(N) scan to claim/find a slot and updates the cache.
+	unsafe fn acquire_hazard_slot(&self, thread_key: usize, cache_ptr: *mut usize, ptr: *mut PoolNode) -> usize {
+		let cached_idx = unsafe { *cache_ptr };
+		if cached_idx != usize::MAX {
+			self.hazard_pointers[cached_idx].store(ptr, Ordering::SeqCst);
+			return cached_idx;
+		}
+
+		let mut empty_slot = usize::MAX;
+		for i in 0..POOL_SIZE {
+			let owner = self.hazard_owners[i].load(Ordering::Relaxed);
+			if owner == thread_key {
+				self.hazard_pointers[i].store(ptr, Ordering::SeqCst);
+				unsafe { *cache_ptr = i };
+				return i;
+			} else if owner == 0 && empty_slot == usize::MAX {
+				empty_slot = i;
+			}
+		}
+
+		if empty_slot != usize::MAX {
+			if self.hazard_owners[empty_slot]
+				.compare_exchange(0, thread_key, Ordering::Relaxed, Ordering::Relaxed)
+				.is_ok()
+			{
+				self.hazard_pointers[empty_slot].store(ptr, Ordering::SeqCst);
+				unsafe { *cache_ptr = empty_slot };
+				return empty_slot;
+			} else {
+				return unsafe { self.acquire_hazard_slot(thread_key, cache_ptr, ptr) };
+			}
+		}
+
+		panic!("Hazard pointer slots exhausted");
+	}
+
+	unsafe fn push_to_retired(&self, ptr: *mut PoolNode) {
+		let mut head = self.retired_head.load(Ordering::Relaxed);
+		loop {
+			unsafe { (*ptr).next_retired.store(head, Ordering::Relaxed) };
+			match self
+				.retired_head
+				.compare_exchange_weak(head, ptr, Ordering::Release, Ordering::Relaxed)
+			{
+				Ok(_) => break,
+				Err(new_head) => head = new_head,
+			}
+		}
+	}
+
+	unsafe fn retire_node(&self, ptr: *mut PoolNode) {
+		unsafe { self.push_to_retired(ptr) };
+		unsafe { self.try_reclaim() };
+	}
+
+	/// Empties the retired queue, checking Hazard Pointers, and returning unreferenced memory back
+	/// to the pool
+	unsafe fn try_reclaim(&self) {
+		let mut list = self.retired_head.swap(std::ptr::null_mut(), Ordering::Acquire);
+		let mut unreclaimable = std::ptr::null_mut();
+
+		while !list.is_null() {
+			let node = list;
+			list = unsafe { (*node).next_retired.load(Ordering::Relaxed) };
+
+			let mut is_hazardous = false;
+			for i in 0..POOL_SIZE {
+				if self.hazard_pointers[i].load(Ordering::SeqCst) == node {
+					is_hazardous = true;
+					break;
+				}
+			}
+
+			if is_hazardous {
+				unsafe { (*node).next_retired.store(unreclaimable, Ordering::Relaxed) };
+				unreclaimable = node;
+			} else {
+				unsafe { self.free_node(node) };
+			}
+		}
+
+		while !unreclaimable.is_null() {
+			let node = unreclaimable;
+			unreclaimable = unsafe { (*node).next_retired.load(Ordering::Relaxed) };
+			unsafe { self.push_to_retired(node) };
+		}
+	}
+
+	/// Retrieves the application-specific handler safely via O(1) Hazard Pointer protection
+	unsafe fn get_app_handler(&self, signo: usize, thread_key: usize, cache_ptr: *mut usize) -> KernelSigaction {
+		let mut hp_idx;
+		let mut node_ptr;
+		loop {
+			node_ptr = self.app_handlers[signo].load(Ordering::Acquire);
+			hp_idx = unsafe { self.acquire_hazard_slot(thread_key, cache_ptr, node_ptr) };
+
+			if self.app_handlers[signo].load(Ordering::SeqCst) == node_ptr {
+				break;
+			}
+			self.hazard_pointers[hp_idx].store(std::ptr::null_mut(), Ordering::Release);
+		}
+
+		let data = unsafe { (*node_ptr).data };
+
+		// If application longjmp's here, the Hazard Pointer naturally remains active
+		// protecting this node. Next time the thread receives a signal, the slot is safely overwritten.
+		self.hazard_pointers[hp_idx].store(std::ptr::null_mut(), Ordering::Release);
+		data
+	}
+
+	pub unsafe fn invoke_app_specific_handler(
+		&self,
+		sig: c_int,
+		info: *mut siginfo_t,
+		context: *mut c_void,
+		thread_key: usize,
+		cache_ptr: *mut usize,
+	) {
+		let app_handler = unsafe { self.get_app_handler(sig as usize, thread_key, cache_ptr) };
 
 		// We don't want to emulate SIG_DFL or SIG_IGN
 		assert_ne!(app_handler.handler as usize, { SIG_DFL });
 		assert_ne!(app_handler.handler as usize, { SIG_IGN });
 
 		if app_handler.flags & libc::SA_RESETHAND as u64 != 0 {
-			let app_handlers_ptr = self.app_handlers.get();
+			let new_node = unsafe { self.alloc_node() };
 			unsafe {
-				(*app_handlers_ptr)[sig as usize] = self.dfl_handler;
+				(*new_node).data = self.dfl_handler;
+				(*new_node).next_retired.store(std::ptr::null_mut(), Ordering::Relaxed);
+			}
+			let old_node = self.app_handlers[sig as usize].swap(new_node, Ordering::Release);
+			if !old_node.is_null() {
+				unsafe { self.retire_node(old_node) };
 			}
 		}
 
@@ -308,28 +456,31 @@ impl SignalHandlers {
 		}
 	}
 
-	/// Handles signal action (sigaction) requests from the application
-	///
-	/// This function intercepts the application's attempts to register signal handlers
-	/// and maintains internal state while setting up the actual kernel signal handler
-	/// to be the wrapper function.
-	///
-	/// # Arguments
-	///
-	/// * `signo` - The signal number
-	/// * `newact` - Pointer to the new signal action, or null if only querying
-	/// * `oldact` - Pointer where to store the old signal action, or null if not interested
-	///
-	/// # Returns
-	///
-	/// 0 on success, or a negative error code on failure
-	///
-	/// # Safety
-	///
-	/// This function is unsafe because it:
-	/// - Dereferences raw pointers
-	/// - Modifies signal handling state that affects the entire process
-	/// - Uses low-level system calls
+	/// Resolves the context required for hazard pointers if called outside a normal signal delivery
+	fn get_thread_context() -> (usize, *mut usize) {
+		let registry = crate::core::thread_registry::registry();
+		let gsreldata = registry.get_current_thread_info().map_or_else(
+			|| {
+				let gs_base = unsafe { crate::ffi::get_gs_base() };
+				if gs_base != 0 {
+					gs_base as *mut GSRelData
+				} else {
+					std::ptr::null_mut()
+				}
+			},
+			|info| info.gsreldata,
+		);
+
+		if !gsreldata.is_null() {
+			(gsreldata as usize, unsafe { (*gsreldata).hazard_slot_idx.get() })
+		} else {
+			// Fallback during early initialization: OS Thread ID and a temporary cache pointer
+			let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
+			let mut dummy_cache = usize::MAX;
+			(tid, &mut dummy_cache as *mut usize)
+		}
+	}
+
 	pub unsafe fn handle_app_sigaction(&self, signo: c_int, newact: *const sigaction, oldact: *mut sigaction) -> i64 {
 		// Log the signal action request
 		tracing::trace!(
@@ -339,8 +490,7 @@ impl SignalHandlers {
 			oldact
 		);
 
-		// Hold lock while operating on app_handlers
-		let _guard = SpinLockGuard::new(&self.lock);
+		let (thread_key, cache_ptr) = Self::get_thread_context();
 
 		if signo == libc::SIGSYS {
 			// Handle SIGSYS specially - we ignore registration for SIGSYS
@@ -350,7 +500,7 @@ impl SignalHandlers {
 			}
 
 			if !oldact.is_null() {
-				unsafe { *oldact = self.get_kernel_sigaction(SIGSYS as usize) };
+				unsafe { *oldact = self.get_kernel_sigaction(SIGSYS as usize, thread_key, cache_ptr) };
 			}
 
 			return 0;
@@ -363,7 +513,7 @@ impl SignalHandlers {
 			}
 
 			if !oldact.is_null() {
-				unsafe { *oldact = self.get_kernel_sigaction(signo as usize) };
+				unsafe { *oldact = self.get_kernel_sigaction(signo as usize, thread_key, cache_ptr) };
 			}
 
 			if !newact.is_null() {
@@ -380,7 +530,7 @@ impl SignalHandlers {
 				let old = if oldact.is_null() {
 					unsafe { mem::zeroed() }
 				} else {
-					unsafe { self.get_kernel_sigaction(signo as usize) }
+					unsafe { self.get_kernel_sigaction(signo as usize, thread_key, cache_ptr) }
 				};
 
 				unsafe { self.update_app_handler(signo, *newact) };
@@ -405,7 +555,7 @@ impl SignalHandlers {
 		let old = if oldact.is_null() {
 			unsafe { mem::zeroed() }
 		} else {
-			unsafe { self.get_kernel_sigaction(signo as usize) }
+			unsafe { self.get_kernel_sigaction(signo as usize, thread_key, cache_ptr) }
 		};
 
 		unsafe { self.update_app_handler(signo, *newact) };
@@ -419,62 +569,25 @@ impl SignalHandlers {
 
 	/// Helper to update the application handler array and propagate the change
 	unsafe fn update_app_handler(&self, signo: c_int, new_kernel_act: sigaction) {
-		let app_handlers_ptr = self.app_handlers.get();
-
-		let mut new_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
-		let new_handler_ptr = new_handler_uninit.as_mut_ptr();
+		let new_node = unsafe { self.alloc_node() };
 
 		unsafe {
-			(*new_handler_ptr).handler = mem::transmute::<
-				usize,
-				unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
-			>(new_kernel_act.sa_sigaction);
-			(*new_handler_ptr).flags = new_kernel_act.sa_flags as u64;
-			(*new_handler_ptr).restorer = None;
-			(*new_handler_ptr).mask = new_kernel_act.sa_mask;
+			(*new_node).data.handler = mem::transmute(new_kernel_act.sa_sigaction);
+			(*new_node).data.flags = new_kernel_act.sa_flags as u64;
+			(*new_node).data.restorer = None;
+			(*new_node).data.mask = new_kernel_act.sa_mask;
+			(*new_node).next_retired.store(std::ptr::null_mut(), Ordering::Relaxed);
 		}
 
-		let new_handler = unsafe { new_handler_uninit.assume_init() };
+		let old_node = self.app_handlers[signo as usize].swap(new_node, Ordering::Release);
 
-		unsafe {
-			(*app_handlers_ptr)[signo as usize] = new_handler;
+		if !old_node.is_null() {
+			unsafe { self.retire_node(old_node) };
 		}
 	}
 
-	/// Retrieves the application-specific handler for a given signal
-	///
-	/// # Arguments
-	///
-	/// * `signo` - The signal number
-	///
-	/// # Returns
-	///
-	/// The application's registered handler for the specified signal
-	///
-	/// # Safety
-	///
-	/// This function is unsafe because it dereferences the internal `UnsafeCell`
-	/// without synchronization (caller must ensure exclusive access or use the lock)
-	unsafe fn get_app_handler(&self, signo: usize) -> KernelSigaction {
-		unsafe { (*self.app_handlers.get())[signo] }
-	}
-
-	/// Converts an internal `KernelSigaction` to the user-facing sigaction structure
-	///
-	/// # Arguments
-	///
-	/// * `signo` - The signal number
-	///
-	/// # Returns
-	///
-	/// A sigaction structure representing the current handler for the specified signal
-	///
-	/// # Safety
-	///
-	/// This function is unsafe because it dereferences the internal `UnsafeCell`
-	/// without synchronization (caller must ensure exclusive access or use the lock)
-	unsafe fn get_kernel_sigaction(&self, signo: usize) -> sigaction {
-		let handler = unsafe { self.get_app_handler(signo) };
+	unsafe fn get_kernel_sigaction(&self, signo: usize, thread_key: usize, cache_ptr: *mut usize) -> sigaction {
+		let handler = unsafe { self.get_app_handler(signo, thread_key, cache_ptr) };
 
 		let mut act: sigaction = unsafe { mem::zeroed() };
 		act.sa_sigaction = handler.handler as usize;
@@ -562,23 +675,21 @@ impl SignalHandlers {
 		let new_handlers = unsafe { libc::malloc(std::mem::size_of::<Self>()).cast::<Self>() };
 		assert!(!new_handlers.is_null(), "Failed to allocate SignalHandlers");
 
-		let dfl_handler = self.dfl_handler;
-		let mut app_handlers = [dfl_handler; NSIG];
+		unsafe { libc::memset(new_handlers.cast(), 0, std::mem::size_of::<Self>()) };
+		unsafe { std::ptr::write(std::ptr::addr_of_mut!((*new_handlers).dfl_handler), self.dfl_handler) };
 
-		let app_handlers_ptr = self.app_handlers.get();
+		let (thread_key, cache_ptr) = Self::get_thread_context();
 
-		unsafe { std::ptr::copy_nonoverlapping((*app_handlers_ptr).as_ptr(), app_handlers.as_mut_ptr(), NSIG) };
+		for i in 0..NSIG {
+			let handler_copy = unsafe { self.get_app_handler(i, thread_key, cache_ptr) };
+			let node = unsafe { (*new_handlers).alloc_node() };
 
-		unsafe {
-			std::ptr::write(
-				new_handlers,
-				Self {
-					dfl_handler,
-					app_handlers: UnsafeCell::new(app_handlers),
-					lock: SpinLock::new(),
-				},
-			);
-		};
+			unsafe {
+				(*node).data = handler_copy;
+				(*node).next_retired.store(std::ptr::null_mut(), Ordering::Relaxed);
+				(*new_handlers).app_handlers[i].store(node, Ordering::Relaxed);
+			}
+		}
 
 		new_handlers
 	}

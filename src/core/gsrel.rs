@@ -67,6 +67,10 @@ pub struct GSRelData {
 
 	/// Base of the XSAVE area stack
 	pub xsave_area_stack_base: PageAligned<[u8; XSAVE_SIZE * 6]>,
+
+	/// Caches the thread's permanently claimed Hazard Pointer slot index.
+	/// MUST be initialized to `usize::MAX`.
+	pub hazard_slot_idx: std::cell::UnsafeCell<usize>,
 }
 
 impl GSRelData {
@@ -116,6 +120,8 @@ impl GSRelData {
 				UnsafeCell::new((*gsreldata).rip_after_syscall_stack_base.as_mut_ptr());
 
 			(*gsreldata).xsave_area_stack_current = UnsafeCell::new((*gsreldata).xsave_area_stack_base.0.as_mut_ptr());
+
+			(*gsreldata).hazard_slot_idx = UnsafeCell::new(usize::MAX);
 
 			let result = set_gs_base(gsreldata as u64);
 			assert_eq!(result, 0, "Failed to set GS base register");

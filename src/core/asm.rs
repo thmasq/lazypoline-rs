@@ -170,8 +170,15 @@ pub extern "C" fn setup_vforked_child() {
 pub extern "C" fn teardown_thread_metadata() {
 	debug!("Tearing down thread metadata");
 
+	let registry = thread_registry::registry();
+
+	let owns_signal_handlers = registry
+		.get_current_thread_info()
+		.map(|info| !info.shares_signal_handlers())
+		.unwrap_or(false);
+
 	// Unregister from the thread registry
-	thread_registry::registry().unregister_current_thread();
+	registry.unregister_current_thread();
 
 	// Disable SUD for this thread to allow syscalls during cleanup
 	let result = unsafe {
@@ -199,9 +206,11 @@ pub extern "C" fn teardown_thread_metadata() {
 		let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
 
 		if !signal_handlers.is_null() {
-			// In a real implementation, you might free any resources
-			// allocated by the signal handlers
 			trace!("Cleaning up signal handlers at {:p}", signal_handlers);
+
+			if owns_signal_handlers {
+				unsafe { libc::free(signal_handlers.cast::<libc::c_void>()) };
+			}
 		}
 	}
 

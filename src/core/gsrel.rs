@@ -7,10 +7,11 @@
 #![allow(clippy::inline_always)]
 
 use crate::core::signal::SignalHandlers;
-use crate::ffi::{PageAligned, mmap_at_addr, set_gs_base};
+use crate::ffi::{XSaveAligned, mmap_at_addr, set_gs_base};
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
+use std::mem::offset_of;
 use std::ptr::null_mut;
 
 /// Offset of the SUD selector in the `GSRelData` structure
@@ -23,7 +24,7 @@ pub const SIGRETURN_STACK_SP_OFFSET: usize = 16;
 pub const RIP_AFTER_SYSCALL_STACK_SP_OFFSET: usize = 4120;
 
 /// Offset of the XSAVE area stack in the `GSRelData` structure
-pub const XSAVE_AREA_STACK_SP_OFFSET: usize = 8256;
+pub const XSAVE_AREA_STACK_SP_OFFSET: usize = 8224;
 
 /// Flags for XSAVE register saving
 pub const XSAVE_EAX: u32 = 0b111; // saves x87 state, XMM & YMM vector registers
@@ -41,14 +42,8 @@ pub struct GSRelData {
 	/// Selector for Syscall User Dispatch (0 = allow, 1 = block)
 	pub sud_selector: UnsafeCell<u8>,
 
-	/// Padding to align `signal_handlers` to 8 bytes
-	_padding1: [u8; 7],
-
 	/// Pointer to the signal handlers
 	pub signal_handlers: UnsafeCell<*mut SignalHandlers>,
-
-	/// Padding for alignment
-	_padding2: [u8; 8],
 
 	/// Current pointer into the sigreturn stack
 	pub sigreturn_stack_current: UnsafeCell<*mut u8>,
@@ -66,7 +61,7 @@ pub struct GSRelData {
 	pub xsave_area_stack_current: UnsafeCell<*mut u8>,
 
 	/// Base of the XSAVE area stack
-	pub xsave_area_stack_base: PageAligned<[u8; XSAVE_SIZE * 6]>,
+	pub xsave_area_stack_base: XSaveAligned<[u8; XSAVE_SIZE * 6]>, // Offset 8256
 
 	/// Caches the thread's permanently claimed Hazard Pointer slot index.
 	/// MUST be initialized to `usize::MAX`.
@@ -250,3 +245,11 @@ impl Drop for BlockScope {
 		set_privilege_level(self.old_selector);
 	}
 }
+
+const _: () = {
+	assert!(offset_of!(GSRelData, sud_selector) == SUD_SELECTOR_OFFSET);
+	assert!(offset_of!(GSRelData, sigreturn_stack_current) == SIGRETURN_STACK_SP_OFFSET);
+	assert!(offset_of!(GSRelData, rip_after_syscall_stack_current) == RIP_AFTER_SYSCALL_STACK_SP_OFFSET);
+	assert!(offset_of!(GSRelData, xsave_area_stack_current) == XSAVE_AREA_STACK_SP_OFFSET);
+	assert!(offset_of!(GSRelData, xsave_area_stack_base) % 64 == 0);
+};

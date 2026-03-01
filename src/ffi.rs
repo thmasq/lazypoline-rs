@@ -205,6 +205,13 @@ pub mod types {
 	/// hardware or operating system requirements.
 	#[repr(align(4096))]
 	pub struct PageAligned<T>(pub T);
+
+	/// A wrapper that ensures its contained value is aligned to a page boundary (64 bytes).
+	///
+	/// This is useful for data structures that must be page-aligned for
+	/// hardware or operating system requirements.
+	#[repr(align(64))]
+	pub struct XSaveAligned<T>(pub T);
 }
 
 // Functions for syscall interposition

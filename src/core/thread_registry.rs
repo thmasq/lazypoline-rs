@@ -5,26 +5,28 @@
 //! parent-child thread relationships, thread-local state, and cleanup.
 
 use crate::core::gsrel::GSRelData;
-use libc::pthread_t;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::thread::ThreadId;
 use tracing::debug;
+
+/// Helper function to reliably get the current OS-level thread ID.
+/// This avoids reading uninitialized user-space TLS after a raw clone syscall.
+#[inline]
+fn get_current_os_tid() -> libc::pid_t {
+	unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t }
+}
 
 /// Information about a registered thread
 #[derive(Debug)]
 pub struct ThreadInfo {
-	/// The thread ID
-	pub thread_id: ThreadId,
-
-	/// The pthread ID
-	pub pthread_id: pthread_t,
+	/// The OS-level thread ID (TID)
+	pub thread_id: libc::pid_t,
 
 	/// The process ID (for vfork tracking)
 	pub process_id: libc::pid_t,
 
 	/// The parent thread's ID (if known)
-	pub parent_thread_id: Option<ThreadId>,
+	pub parent_thread_id: Option<libc::pid_t>,
 
 	/// Pointer to the thread's `GSRelData`
 	pub gsreldata: *mut GSRelData,
@@ -84,17 +86,14 @@ impl ThreadInfo {
 /// This structure maintains a global registry of all threads and their
 /// associated `GSRelData` pointers for the entire framework.
 pub struct ThreadRegistry {
-	/// Map of thread IDs to thread information
-	threads: RwLock<HashMap<ThreadId, Arc<ThreadInfo>>>,
+	/// Map of OS thread IDs (TID) to thread information
+	threads: RwLock<HashMap<libc::pid_t, Arc<ThreadInfo>>>,
 
-	/// Map of pthread IDs to thread IDs (for lookup by pthread ID)
-	pthread_map: RwLock<HashMap<pthread_t, ThreadId>>,
+	/// Map of process IDs (PID) to thread IDs (TID) (for vfork tracking)
+	process_map: RwLock<HashMap<libc::pid_t, libc::pid_t>>,
 
-	/// Map of process IDs to thread IDs (for vfork tracking)
-	process_map: RwLock<HashMap<libc::pid_t, ThreadId>>,
-
-	/// Map of child thread IDs to parent thread IDs
-	child_parent_map: RwLock<HashMap<ThreadId, ThreadId>>,
+	/// Map of child thread IDs (TID) to parent thread IDs (TID)
+	child_parent_map: RwLock<HashMap<libc::pid_t, libc::pid_t>>,
 }
 
 impl ThreadRegistry {
@@ -102,7 +101,6 @@ impl ThreadRegistry {
 	fn new() -> Self {
 		Self {
 			threads: RwLock::new(HashMap::new()),
-			pthread_map: RwLock::new(HashMap::new()),
 			process_map: RwLock::new(HashMap::new()),
 			child_parent_map: RwLock::new(HashMap::new()),
 		}
@@ -113,21 +111,19 @@ impl ThreadRegistry {
 	/// # Parameters
 	///
 	/// * `gsreldata` - Pointer to the thread's `GSRelData`
-	/// * `parent_thread_id` - Optional parent thread ID
+	/// * `parent_thread_id` - Optional parent OS thread ID
 	/// * `clone_flags` - Optional clone flags used to create this thread
 	pub fn register_current_thread(
 		&self,
 		gsreldata: *mut GSRelData,
-		parent_thread_id: Option<ThreadId>,
+		parent_thread_id: Option<libc::pid_t>,
 		clone_flags: Option<u64>,
 	) -> Arc<ThreadInfo> {
-		let thread_id = std::thread::current().id();
-		let pthread_id = unsafe { libc::pthread_self() };
+		let thread_id = get_current_os_tid();
 		let process_id = unsafe { libc::getpid() };
 
 		let thread_info = Arc::new(ThreadInfo {
 			thread_id,
-			pthread_id,
 			process_id,
 			parent_thread_id,
 			gsreldata,
@@ -142,11 +138,6 @@ impl ThreadRegistry {
 		}
 
 		{
-			let mut pthread_map = self.pthread_map.write().unwrap();
-			pthread_map.insert(pthread_id, thread_id);
-		}
-
-		{
 			let mut process_map = self.process_map.write().unwrap();
 			process_map.insert(process_id, thread_id);
 		}
@@ -156,10 +147,7 @@ impl ThreadRegistry {
 			child_parent_map.insert(thread_id, parent_id);
 		}
 
-		debug!(
-			"Registered thread {:?} (pthread: {:?}, pid: {})",
-			thread_id, pthread_id, process_id
-		);
+		debug!("Registered thread {} (pid: {})", thread_id, process_id);
 
 		thread_info
 	}
@@ -171,7 +159,7 @@ impl ThreadRegistry {
 	/// * `gsreldata` - Pointer to the thread's `GSRelData`
 	/// * `clone_flags` - Clone flags used to create this thread
 	pub fn register_child_thread(&self, gsreldata: *mut GSRelData, clone_flags: u64) -> Arc<ThreadInfo> {
-		let parent_thread_id = std::thread::current().id();
+		let parent_thread_id = get_current_os_tid();
 		self.register_current_thread(gsreldata, Some(parent_thread_id), Some(clone_flags))
 	}
 
@@ -179,19 +167,14 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID to unregister
-	pub fn unregister_thread(&self, thread_id: ThreadId) {
+	/// * `thread_id` - The OS thread ID (TID) to unregister
+	pub fn unregister_thread(&self, thread_id: libc::pid_t) {
 		let thread_info = {
 			let mut threads = self.threads.write().unwrap();
 			threads.remove(&thread_id)
 		};
 
 		if let Some(thread_info) = thread_info {
-			{
-				let mut pthread_map = self.pthread_map.write().unwrap();
-				pthread_map.remove(&thread_info.pthread_id);
-			}
-
 			{
 				let mut process_map = self.process_map.write().unwrap();
 				process_map.remove(&thread_info.process_id);
@@ -202,13 +185,13 @@ impl ThreadRegistry {
 				child_parent_map.remove(&thread_id);
 			}
 
-			debug!("Unregistered thread {:?}", thread_id);
+			debug!("Unregistered thread {}", thread_id);
 		}
 	}
 
 	/// Unregister the current thread
 	pub fn unregister_current_thread(&self) {
-		let thread_id = std::thread::current().id();
+		let thread_id = get_current_os_tid();
 		self.unregister_thread(thread_id);
 	}
 
@@ -216,12 +199,12 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID to get information for
+	/// * `thread_id` - The OS thread ID (TID) to get information for
 	///
 	/// # Returns
 	///
 	/// Arc to the thread information, or None if not found
-	pub fn get_thread_info(&self, thread_id: ThreadId) -> Option<Arc<ThreadInfo>> {
+	pub fn get_thread_info(&self, thread_id: libc::pid_t) -> Option<Arc<ThreadInfo>> {
 		let threads = self.threads.read().unwrap();
 		threads.get(&thread_id).cloned()
 	}
@@ -232,25 +215,7 @@ impl ThreadRegistry {
 	///
 	/// Arc to the thread information, or None if not found
 	pub fn get_current_thread_info(&self) -> Option<Arc<ThreadInfo>> {
-		let thread_id = std::thread::current().id();
-		self.get_thread_info(thread_id)
-	}
-
-	/// Get information about a thread by pthread ID
-	///
-	/// # Parameters
-	///
-	/// * `pthread_id` - The pthread ID to get information for
-	///
-	/// # Returns
-	///
-	/// Arc to the thread information, or None if not found
-	pub fn get_thread_info_by_pthread(&self, pthread_id: pthread_t) -> Option<Arc<ThreadInfo>> {
-		let thread_id = {
-			let pthread_map = self.pthread_map.read().unwrap();
-			*pthread_map.get(&pthread_id)?
-		};
-
+		let thread_id = get_current_os_tid();
 		self.get_thread_info(thread_id)
 	}
 
@@ -258,12 +223,12 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID whose parent to get information for
+	/// * `thread_id` - The OS thread ID (TID) whose parent to get information for
 	///
 	/// # Returns
 	///
 	/// Arc to the parent thread information, or None if not found
-	pub fn get_parent_thread_info(&self, thread_id: ThreadId) -> Option<Arc<ThreadInfo>> {
+	pub fn get_parent_thread_info(&self, thread_id: libc::pid_t) -> Option<Arc<ThreadInfo>> {
 		let parent_id = {
 			let child_parent_map = self.child_parent_map.read().unwrap();
 			*child_parent_map.get(&thread_id)?
@@ -278,7 +243,7 @@ impl ThreadRegistry {
 	///
 	/// Arc to the parent thread information, or None if not found
 	pub fn get_current_parent_thread_info(&self) -> Option<Arc<ThreadInfo>> {
-		let thread_id = std::thread::current().id();
+		let thread_id = get_current_os_tid();
 		self.get_parent_thread_info(thread_id)
 	}
 
@@ -286,12 +251,12 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID to get `GSRelData` for
+	/// * `thread_id` - The OS thread ID (TID) to get `GSRelData` for
 	///
 	/// # Returns
 	///
 	/// Pointer to the `GSRelData`, or null if not found
-	pub fn get_gsreldata(&self, thread_id: ThreadId) -> *mut GSRelData {
+	pub fn get_gsreldata(&self, thread_id: libc::pid_t) -> *mut GSRelData {
 		self.get_thread_info(thread_id)
 			.map_or_else(std::ptr::null_mut, |info| info.gsreldata)
 	}
@@ -302,7 +267,7 @@ impl ThreadRegistry {
 	///
 	/// Pointer to the `GSRelData`, or null if not found
 	pub fn get_current_gsreldata(&self) -> *mut GSRelData {
-		let thread_id = std::thread::current().id();
+		let thread_id = get_current_os_tid();
 		self.get_gsreldata(thread_id)
 	}
 
@@ -310,12 +275,12 @@ impl ThreadRegistry {
 	///
 	/// # Parameters
 	///
-	/// * `thread_id` - The thread ID whose parent's `GSRelData` to get
+	/// * `thread_id` - The OS thread ID (TID) whose parent's `GSRelData` to get
 	///
 	/// # Returns
 	///
 	/// Pointer to the parent's `GSRelData`, or null if not found
-	pub fn get_parent_gsreldata(&self, thread_id: ThreadId) -> *mut GSRelData {
+	pub fn get_parent_gsreldata(&self, thread_id: libc::pid_t) -> *mut GSRelData {
 		self.get_parent_thread_info(thread_id)
 			.map_or_else(std::ptr::null_mut, |info| info.gsreldata)
 	}
@@ -326,7 +291,7 @@ impl ThreadRegistry {
 	///
 	/// Pointer to the parent's `GSRelData`, or null if not found
 	pub fn get_current_parent_gsreldata(&self) -> *mut GSRelData {
-		let thread_id = std::thread::current().id();
+		let thread_id = get_current_os_tid();
 		self.get_parent_gsreldata(thread_id)
 	}
 
@@ -337,7 +302,7 @@ impl ThreadRegistry {
 	}
 
 	/// Get all registered thread IDs
-	pub fn thread_ids(&self) -> Vec<ThreadId> {
+	pub fn thread_ids(&self) -> Vec<libc::pid_t> {
 		let threads = self.threads.read().unwrap();
 		threads.keys().copied().collect()
 	}
@@ -359,10 +324,10 @@ impl ThreadRegistry {
 			let thread_type = if info.is_thread() { "Thread" } else { "Process" };
 			let parent_info = info
 				.parent_thread_id
-				.map_or_else(|| "no parent".to_string(), |parent_id| format!("parent: {parent_id:?}"));
+				.map_or_else(|| "no parent".to_string(), |parent_id| format!("parent: {parent_id}"));
 
 			debug!(
-				"  {:?}: {} (pid: {}, {}, age: {:?})",
+				"  {}: {} (pid: {}, {}, age: {:?})",
 				id,
 				thread_type,
 				info.process_id,

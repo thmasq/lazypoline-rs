@@ -109,10 +109,9 @@ impl InterposerBuilder {
 		let mut handlers = self.handlers;
 		if handlers.is_empty() {
 			handlers.push(Box::new(DefaultHandler::new()));
-
-			if self.config.trace {
-				handlers.push(Box::new(TracingHandler::new()));
-			}
+		}
+		if self.config.trace {
+			handlers.push(Box::new(TracingHandler::new()));
 		}
 
 		// Set default filter if none provided

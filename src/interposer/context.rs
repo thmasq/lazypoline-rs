@@ -94,20 +94,6 @@ impl InterposerContext {
 			stats.increment(ctx.syscall);
 		}
 
-		// MANDATORY EMULATION OVERRIDE:
-		// These syscalls alter the stack pointer or execution context severely.
-		// Executing them inline via C-ABI will crash the process/thread.
-		if matches!(
-			ctx.syscall,
-			crate::syscall::Syscall::clone | crate::syscall::Syscall::vfork | crate::syscall::Syscall::rt_sigreturn
-		) {
-			tracing::debug!(
-				"Forcing emulation for context-switching syscall: {}",
-				ctx.syscall.name()
-			);
-			return crate::syscall::SyscallAction::Emulate;
-		}
-
 		// Check if the syscall is in a safe list that should always be allowed
 		// to prevent deadlocks or system crashes
 		if is_critical_syscall(ctx.syscall) {
@@ -125,34 +111,37 @@ impl InterposerContext {
 		}
 
 		// Call each handler until one returns a non-Allow action
+		let mut final_action = crate::syscall::SyscallAction::Allow;
+
 		for handler in &self.handlers {
 			let action = handler.handle_syscall(ctx);
-
-			#[allow(clippy::needless_continue)]
-			match action {
-				crate::syscall::SyscallAction::Allow => continue,
-				crate::syscall::SyscallAction::Block(code) => {
-					tracing::debug!(
-						"Blocked syscall {} by handler {} with code {}",
-						ctx.syscall.name(),
-						handler.name(),
-						code
-					);
-					return action;
-				},
-				crate::syscall::SyscallAction::Emulate => {
-					tracing::debug!("Emulating syscall {} by handler {}", ctx.syscall.name(), handler.name());
-					return action;
-				},
-				crate::syscall::SyscallAction::Modify(_) => {
-					tracing::debug!("Modified syscall {} by handler {}", ctx.syscall.name(), handler.name());
-					return action;
-				},
+			if !matches!(action, crate::syscall::SyscallAction::Allow) {
+				final_action = action;
+				tracing::debug!(
+					"Handler {} returned action {:?} for syscall {}",
+					handler.name(),
+					final_action,
+					ctx.syscall.name()
+				);
+				break;
 			}
 		}
 
-		// If no handler returns a non-Allow action, allow the syscall
-		crate::syscall::SyscallAction::Allow
+		// MANDATORY EMULATION OVERRIDE:
+		// These syscalls alter the stack pointer or execution context severely.
+		// They must ALWAYS be emulated via the raw assembly hook.
+		if matches!(
+			ctx.syscall,
+			crate::syscall::Syscall::clone | crate::syscall::Syscall::vfork | crate::syscall::Syscall::rt_sigreturn
+		) {
+			if let crate::syscall::SyscallAction::Block(_) = final_action {
+				return final_action;
+			}
+   				tracing::debug!("Forcing Emulate for context-switching syscall: {}", ctx.syscall.name());
+   				return crate::syscall::SyscallAction::Emulate;
+		}
+
+		final_action
 	}
 
 	/// Get a clone of the current statistics

@@ -174,8 +174,7 @@ pub extern "C" fn teardown_thread_metadata() {
 
 	let owns_signal_handlers = registry
 		.get_current_thread_info()
-		.map(|info| !info.shares_signal_handlers())
-		.unwrap_or(false);
+		.is_some_and(|info| !info.shares_signal_handlers());
 
 	// Unregister from the thread registry
 	registry.unregister_current_thread();

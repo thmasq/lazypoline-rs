@@ -124,21 +124,15 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
 	let rsp = unsafe { *gregs.add(libc::REG_RSP as usize) };
 
-	// Look up the thread in the registry to get its GSRelData
-	let registry = crate::core::thread_registry::registry();
-	let gsreldata = registry.get_current_thread_info().map_or_else(
-		|| {
-			// Fall back to GS base if not in registry
-			let gs_base = unsafe { crate::ffi::get_gs_base() };
-			if gs_base != 0 {
-				gs_base as *mut GSRelData
-			} else {
-				tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
-				panic!("Failed to get GSRelData for current thread");
-			}
-		},
-		|thread_info| thread_info.gsreldata,
-	);
+	let gs_base = unsafe { crate::ffi::get_gs_base() };
+	if gs_base == 0 {
+		// Note: tracing and panic are technically not async-signal-safe,
+		// but since this is a fatal, unrecoverable path, it is acceptable.
+		tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
+		panic!("Failed to get GSRelData for current thread");
+	}
+
+	let gsreldata = gs_base as *mut GSRelData;
 
 	let signal_handlers = unsafe { *(*gsreldata).signal_handlers.get() };
 	if signal_handlers.is_null() {

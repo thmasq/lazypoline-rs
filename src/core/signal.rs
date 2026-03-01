@@ -150,8 +150,8 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 	assert_eq!(rsp, unsafe { *gregs.add(libc::REG_RSP as usize) });
 
 	// Set up the return trampoline
-	// Modify the stack to save the original RIP
-	unsafe { *gregs.add(libc::REG_RSP as usize) -= std::mem::size_of::<u64>() as i64 };
+	// Modify the stack to skip the 128-byte red zone and save the original RIP
+	unsafe { *gregs.add(libc::REG_RSP as usize) -= (128 + std::mem::size_of::<u64>()) as i64 };
 	let stack_bottom = (unsafe { *gregs.add(libc::REG_RSP as usize) }) as *mut i64;
 	unsafe { *stack_bottom = *gregs.add(libc::REG_RIP as usize) };
 

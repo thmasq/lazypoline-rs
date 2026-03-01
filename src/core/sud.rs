@@ -148,7 +148,8 @@ unsafe extern "C" fn handle_sigsys(sig: c_int, info: *mut libc::siginfo_t, conte
 	// Set up the stack for the asm_syscall_hook
 	unsafe {
 		// Push RIP and RAX to set up stack for asm_syscall_hook
-		*gregs.add(libc::REG_RSP as usize) -= 2 * std::mem::size_of::<u64>() as i64;
+		// Skip the 128-byte red zone before pushing to avoid data corruption
+		*gregs.add(libc::REG_RSP as usize) -= (128 + 2 * std::mem::size_of::<u64>()) as i64;
 		let stack_bottom = *gregs.add(libc::REG_RSP as usize) as *mut i64;
 
 		*stack_bottom.add(1) = *gregs.add(libc::REG_RIP as usize);

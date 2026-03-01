@@ -162,13 +162,14 @@ asm_syscall_hook:
 
 .do_nothing:
     exit_interposer
-    ret
+    addq $136, %rsp
+    jmp *-136(%rsp)
 
 .do_rt_sigreturn:
     # All the syscall arguments in rdi etc should still be in the original state
     # But they don't matter for sigreturn
 
-    addq $8, %rsp # Discard the pushed return address
+    addq $136, %rsp # Discard the pushed return address and skip red zone padding
     # `wrap_signal_handler` will have set REG_RIP to `restore_selector_trampoline`
     # and the original RIP to return to is pushed to the stack of the original program
     syscall 
@@ -183,8 +184,8 @@ asm_syscall_hook:
     # Push the right return address to the child's stack as well
     pushq %r11
     movq 0x8(%rsp), %r11 # rip_after_syscall -> clobbered reg
-    subq $8, %rsi # Make space on the child stack
-    movq %r11, 0x0(%rsi) # rip_after_syscall -> top of child stack
+    subq $136, %rsi # Make space on the child stack and respect red zone
+    movq %r11, 0x0(%rsi) # rip_after_syscall -> new top of child stack
     popq %r11
 
 .do_clone_syscall:
@@ -194,7 +195,8 @@ asm_syscall_hook:
     jz .new_thread
     # Parent here: either done, or error
     exit_interposer
-    ret
+    addq $136, %rsp
+    jmp *-136(%rsp)
 
 .new_thread:
     # Child running on a completely new stack
@@ -209,7 +211,8 @@ asm_syscall_hook:
     exit_interposer
     # Cleanup and return to syscall site
     popq %rax
-    ret
+    addq $136, %rsp
+    jmp *-136(%rsp)
 
 .do_vfork:
     # vfork is a really annoying syscall
@@ -237,7 +240,8 @@ asm_syscall_hook:
     movq %rcx, (%rsp)
 
     exit_interposer
-    ret
+    addq $136, %rsp
+    jmp *-136(%rsp)
 
 .vforked_child_enable_sud:
     # We will set up a gsrel region here that shares sigdisps with the parent
@@ -248,7 +252,8 @@ asm_syscall_hook:
     popq %rax
     # Lower privileges and return
     exit_interposer
-    ret
+    addq $136, %rsp
+    jmp *-136(%rsp)
 
 .section .text.restore_selector_trampoline,"ax",@progbits
 .p2align 4
@@ -273,4 +278,5 @@ restore_selector_trampoline:
     popq %rcx
     popq %rdx
     popq %rax
-    ret # Old RIP sits at top of stack
+    addq $136, %rsp
+    jmp *-136(%rsp) # Indirect jump to the safely stored RIP

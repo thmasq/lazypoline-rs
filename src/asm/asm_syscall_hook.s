@@ -118,7 +118,6 @@ asm_syscall_hook:
     xorq %r12, %r12
     pushq %r12 # Make room for `should_emulate` (false by default)
     leaq 0x0(%rsp), %r12 # &should_emulate -> r12
-    subq $8, %rsp
     pushq %r12  # &should_emulate as last arg of zpoline_syscall_handler
     pushq 16(%rbp) # Address of instruction after rewritten syscall
     pushq %rax
@@ -127,7 +126,7 @@ asm_syscall_hook:
     callq zpoline_syscall_handler
     # rax now contains the syscall return value
 
-    addq $32, %rsp # Discard the pushed rax, rip_after_syscall and &should_emulate
+    addq $24, %rsp # Discard the pushed rax, rip_after_syscall and &should_emulate
     popq %r12 # should_emulate -> r12
     
     teardown_c_stack
@@ -177,6 +176,10 @@ asm_syscall_hook:
     int3
 
 .do_clone_thread_or_clone_vfork:
+    # Check if rsi is 0 (which means it's a fork() where child inherits parent's stack)
+    testq %rsi, %rsi
+    jz .do_clone_syscall
+
     # Push the right return address to the child's stack as well
     pushq %r11
     movq 0x8(%rsp), %r11 # rip_after_syscall -> clobbered reg
@@ -184,6 +187,7 @@ asm_syscall_hook:
     movq %r11, 0x0(%rsi) # rip_after_syscall -> top of child stack
     popq %r11
 
+.do_clone_syscall:
     # All args are still set up as original
     syscall
     testq %rax, %rax

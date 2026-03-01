@@ -48,7 +48,7 @@ pub struct KernelSigaction {
 #[repr(align(64))]
 pub struct PoolNode {
 	pub data: KernelSigaction,
-	pub next_retired: AtomicPtr<PoolNode>,
+	pub next_retired: AtomicPtr<Self>,
 }
 
 /// Represents the different types of default signal dispositions
@@ -82,12 +82,12 @@ pub struct SignalHandlers {
 	app_handlers: [AtomicPtr<PoolNode>; NSIG],
 	/// Bitmap tracking which slots in the pool are currently allocated (1 = allocated, 0 = free)
 	bitmap: [AtomicU64; POOL_BITMAP_WORDS],
-	/// Pre-allocated blocks of memory for KernelSigaction nodes
+	/// Pre-allocated blocks of memory for `KernelSigaction` nodes
 	pool: [UnsafeCell<PoolNode>; POOL_SIZE],
 	/// Hazard Pointers array. Threads announce which node they are reading to protect it from
 	/// reclamation.
 	hazard_pointers: [AtomicPtr<PoolNode>; POOL_SIZE],
-	/// Tracks the Thread Key (typically the GSRelData memory address) that permanently owns the
+	/// Tracks the Thread Key (typically the `GSRelData` memory address) that permanently owns the
 	/// hazard slot
 	hazard_owners: [AtomicUsize; POOL_SIZE],
 	/// Lock-free stack of old pointers waiting to be returned to the pool
@@ -194,7 +194,8 @@ impl SignalHandlers {
 			// Create a MaybeUninit for dfl_handler
 			let mut dfl_handler_uninit: MaybeUninit<KernelSigaction> = MaybeUninit::uninit();
 			let dfl_ptr = dfl_handler_uninit.as_mut_ptr();
-			(*dfl_ptr).handler = mem::transmute(SIG_DFL);
+			(*dfl_ptr).handler =
+				mem::transmute::<usize, unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)>(SIG_DFL);
 			(*dfl_ptr).flags = 0;
 			(*dfl_ptr).restorer = None;
 			(*dfl_ptr).mask = mem::zeroed();
@@ -256,7 +257,10 @@ impl SignalHandlers {
 
 					if result == 0 {
 						let act = act.assume_init();
-						(*node).data.handler = mem::transmute(act.sa_sigaction);
+						(*node).data.handler = mem::transmute::<
+							usize,
+							unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+						>(act.sa_sigaction);
 						(*node).data.flags = act.sa_flags as u64;
 						(*node).data.restorer = None;
 						(*node).data.mask = act.sa_mask;
@@ -303,7 +307,7 @@ impl SignalHandlers {
 
 	/// Returns a node to the wait-free memory pool by clearing its bit
 	unsafe fn free_node(&self, ptr: *mut PoolNode) {
-		let base = self.pool.as_ptr() as *const PoolNode;
+		let base = self.pool.as_ptr().cast::<PoolNode>();
 		let offset = unsafe { ptr.offset_from(base) };
 		debug_assert!(offset >= 0 && (offset as usize) < POOL_SIZE);
 
@@ -342,9 +346,8 @@ impl SignalHandlers {
 				self.hazard_pointers[empty_slot].store(ptr, Ordering::SeqCst);
 				unsafe { *cache_ptr = empty_slot };
 				return empty_slot;
-			} else {
-				return unsafe { self.acquire_hazard_slot(thread_key, cache_ptr, ptr) };
 			}
+			return unsafe { self.acquire_hazard_slot(thread_key, cache_ptr, ptr) };
 		}
 
 		panic!("Hazard pointer slots exhausted");
@@ -471,13 +474,13 @@ impl SignalHandlers {
 			|info| info.gsreldata,
 		);
 
-		if !gsreldata.is_null() {
-			(gsreldata as usize, unsafe { (*gsreldata).hazard_slot_idx.get() })
-		} else {
+		if gsreldata.is_null() {
 			// Fallback during early initialization: OS Thread ID and a temporary cache pointer
 			let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
 			let mut dummy_cache = usize::MAX;
-			(tid, &mut dummy_cache as *mut usize)
+			(tid, &raw mut dummy_cache)
+		} else {
+			(gsreldata as usize, unsafe { (*gsreldata).hazard_slot_idx.get() })
 		}
 	}
 
@@ -572,7 +575,10 @@ impl SignalHandlers {
 		let new_node = unsafe { self.alloc_node() };
 
 		unsafe {
-			(*new_node).data.handler = mem::transmute(new_kernel_act.sa_sigaction);
+			(*new_node).data.handler = mem::transmute::<
+				usize,
+				unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+			>(new_kernel_act.sa_sigaction);
 			(*new_node).data.flags = new_kernel_act.sa_flags as u64;
 			(*new_node).data.restorer = None;
 			(*new_node).data.mask = new_kernel_act.sa_mask;

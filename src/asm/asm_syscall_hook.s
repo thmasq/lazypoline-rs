@@ -94,17 +94,17 @@
 
 .macro exit_interposer
     movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
-
-    # rip_after_syscall should be at top of stack here
 .endm
 
 asm_syscall_hook:
     # Pop the saved rax from when we did the trampoline jump
     popq %rax
 
+    subq $128, %rsp
+
     # At this point, the register & stack state is exactly as at the
     # syscall invocation site, except that the rip_after_syscall is
-    # pushed to the top of our stack
+    # pushed to the stack at 128(%rsp)
 
     movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
 
@@ -163,7 +163,7 @@ asm_syscall_hook:
 .do_nothing:
     exit_interposer
     addq $136, %rsp
-    jmp *-136(%rsp)
+    jmp *-8(%rsp)
 
 .do_rt_sigreturn:
     # All the syscall arguments in rdi etc should still be in the original state
@@ -183,7 +183,8 @@ asm_syscall_hook:
 
     # Push the right return address to the child's stack as well
     pushq %r11
-    movq 0x8(%rsp), %r11 # rip_after_syscall -> clobbered reg
+    # Note: 136(%rsp) because we just pushed r11
+    movq 136(%rsp), %r11 # rip_after_syscall -> clobbered reg
     subq $136, %rsi # Make space on the child stack and respect red zone
     movq %r11, 0x0(%rsi) # rip_after_syscall -> new top of child stack
     popq %r11
@@ -196,7 +197,7 @@ asm_syscall_hook:
     # Parent here: either done, or error
     exit_interposer
     addq $136, %rsp
-    jmp *-136(%rsp)
+    jmp *-8(%rsp)
 
 .new_thread:
     # Child running on a completely new stack
@@ -212,14 +213,14 @@ asm_syscall_hook:
     # Cleanup and return to syscall site
     popq %rax
     addq $136, %rsp
-    jmp *-136(%rsp)
+    jmp *-8(%rsp)
 
 .do_vfork:
     # vfork is a really annoying syscall
     # Push the rip_after_syscall to a dedicated stack in the parent's gsrel region
     pushq %rsi
     movq %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET, %rsi
-    movq 8(%rsp), %rcx # rcx is clobbered by syscall anyway
+    movq 136(%rsp), %rcx # rcx is clobbered by syscall anyway
     movq %rcx, (%rsi)
     addq $8, %rsi
     movq %rsi, %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET
@@ -229,6 +230,7 @@ asm_syscall_hook:
     syscall
     testq %rax, %rax
     jz .vforked_child_enable_sud
+    
     # Parent here: either done or error
     # Restore the saved rip_after_syscall to the stack & return
     pushq %rsi
@@ -237,11 +239,11 @@ asm_syscall_hook:
     movq (%rsi), %rcx # rcx has to hold `rip_after_syscall` anyway
     movq %rsi, %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET
     popq %rsi
-    movq %rcx, (%rsp)
+    movq %rcx, 128(%rsp)
 
     exit_interposer
     addq $136, %rsp
-    jmp *-136(%rsp)
+    jmp *-8(%rsp)
 
 .vforked_child_enable_sud:
     # We will set up a gsrel region here that shares sigdisps with the parent
@@ -253,7 +255,7 @@ asm_syscall_hook:
     # Lower privileges and return
     exit_interposer
     addq $136, %rsp
-    jmp *-136(%rsp)
+    jmp *-8(%rsp)
 
 .section .text.restore_selector_trampoline,"ax",@progbits
 .p2align 4
@@ -278,5 +280,6 @@ restore_selector_trampoline:
     popq %rcx
     popq %rdx
     popq %rax
-    addq $136, %rsp
-    jmp *-136(%rsp) # Indirect jump to the safely stored RIP
+    # Only orig_rip is on the stack here (from wrap_signal_handler), no red zone gap
+    addq $8, %rsp
+    jmp *-8(%rsp) # Indirect jump to the safely stored RIP

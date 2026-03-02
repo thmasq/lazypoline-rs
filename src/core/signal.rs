@@ -70,11 +70,6 @@ pub enum SigDispType {
 }
 
 /// Manages signal handlers for a process
-///
-/// This structure maintains a table of application-specific signal handlers
-/// and allows for intercepting and wrapping signals while maintaining the
-/// original handler behavior. It also provides transparent syscall blocking
-/// during signal handling to maintain system call interception integrity.
 pub struct SignalHandlers {
 	/// The default signal handler
 	dfl_handler: KernelSigaction,
@@ -113,8 +108,8 @@ unsafe extern "C" {
 /// 1. Preserves the current privilege level at signal entry
 /// 2. Temporarily allows syscalls during signal handling
 /// 3. Invokes the application's handler
-/// 4. Sets up a return trampoline to restore the original privilege level
-/// 5. Blocks syscalls until the trampoline executes
+/// 4. Pushes the original privilege level to the `sigreturn_stack`
+/// 5. Blocks syscalls to ensure `rt_sigreturn` is intercepted
 unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, context: *mut c_void) {
 	let selector_on_signal_entry = get_privilege_level();
 
@@ -126,8 +121,6 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 
 	let gs_base = unsafe { crate::ffi::get_gs_base() };
 	if gs_base == 0 {
-		// Note: tracing and panic are technically not async-signal-safe,
-		// but since this is a fatal, unrecoverable path, it is acceptable.
 		tracing::error!("wrap_signal_handler: Failed to get GSRelData for current thread");
 		panic!("Failed to get GSRelData for current thread");
 	}
@@ -140,45 +133,62 @@ unsafe extern "C" fn wrap_signal_handler(signo: c_int, info: *mut siginfo_t, con
 		panic!("No signal handlers found for current thread");
 	}
 
-	// Extract the O(1) cache requirements for the hazard pointers
 	let thread_key = gsreldata as usize;
 	let cache_ptr = unsafe { (*gsreldata).hazard_slot_idx.get() };
 
 	unsafe { (*signal_handlers).invoke_app_specific_handler(signo, info, context, thread_key, cache_ptr) };
 
-	// Verify RSP wasn't modified
+	// Verify RSP wasn't modified by the application's signal handler
 	assert_eq!(rsp, unsafe { *gregs.add(libc::REG_RSP as usize) });
 
-	// Set up the return trampoline
-	// Modify the stack to skip the 128-byte red zone and save the original RIP
-	unsafe { *gregs.add(libc::REG_RSP as usize) -= (128 + std::mem::size_of::<u64>()) as i64 };
-	let stack_bottom = (unsafe { *gregs.add(libc::REG_RSP as usize) }) as *mut i64;
-	unsafe { *stack_bottom = *gregs.add(libc::REG_RIP as usize) };
+	// Handle nested signal delivery through a stack of selector_on_entry's
+	let sigreturn_stack_current_ptr = unsafe { (*gsreldata).sigreturn_stack_current.get() };
+	let sigreturn_stack_current = unsafe { *sigreturn_stack_current_ptr } as *mut u64;
 
-	// Change RIP to point to our trampoline
-	unsafe { *gregs.add(libc::REG_RIP as usize) = restore_selector_trampoline as *const () as i64 };
+	// Write the 1-byte selector as an 8-byte value to align with the assembly's 8-byte pop
+	unsafe { *sigreturn_stack_current = selector_on_signal_entry as u64 };
 
-	let sigreturn_stack_current = unsafe { (*gsreldata).sigreturn_stack_current.get() };
-	unsafe { *(*sigreturn_stack_current) = selector_on_signal_entry };
-	unsafe { *sigreturn_stack_current = (*sigreturn_stack_current).add(1) };
+	// Advance pointer by 8 bytes
+	unsafe { *sigreturn_stack_current_ptr = sigreturn_stack_current.add(1).cast::<u8>() };
 
-	// Block syscalls until the sigreturn trampoline restores the original level
+	// Always deprivilege here so we intercept the sigreturn.
+	// If the trampoline executes, it will restore the original privilege level cleanly.
 	set_privilege_level(crate::ffi::SYSCALL_DISPATCH_FILTER_BLOCK);
+}
+
+/// Sets up the target return address for an intercepted sigreturn.
+///
+/// Called from assembly `asm_syscall_hook` prior to executing the `rt_sigreturn`
+/// syscall. This writes the application's original RIP to the `sigreturn_stack`
+/// and points the `ucontext_t` RIP to the `restore_selector_trampoline` so that
+/// the kernel safely routes execution there after restoring all registers.
+#[no_mangle]
+pub unsafe extern "C" fn setup_restore_selector_trampoline(context: *mut c_void) {
+	let uctxt = unsafe { &mut *context.cast::<ucontext_t>() };
+	let gregs = uctxt.uc_mcontext.gregs.as_mut_ptr();
+
+	let gs_base = unsafe { crate::ffi::get_gs_base() };
+	if gs_base == 0 {
+		panic!("setup_restore_selector_trampoline: Failed to get GSRelData for current thread");
+	}
+	let gsreldata = gs_base as *mut GSRelData;
+
+	let sigreturn_stack_current_ptr = unsafe { (*gsreldata).sigreturn_stack_current.get() };
+	let sigreturn_stack_current = unsafe { *sigreturn_stack_current_ptr } as *mut u64;
+
+	// Push the original RIP from the application context to the sigreturn stack
+	unsafe { *sigreturn_stack_current = *gregs.add(libc::REG_RIP as usize) as u64 };
+
+	// Advance pointer by 8 bytes
+	unsafe { *sigreturn_stack_current_ptr = sigreturn_stack_current.add(1).cast::<u8>() };
+
+	// Redirect the RIP in the ucontext_t structure to our trampoline.
+	// Once the kernel finishes processing rt_sigreturn, it will jump here.
+	unsafe { *gregs.add(libc::REG_RIP as usize) = restore_selector_trampoline as *const () as i64 };
 }
 
 impl SignalHandlers {
 	/// Creates a new `SignalHandlers` instance
-	///
-	/// # Returns
-	///
-	/// A pointer to the newly allocated `SignalHandlers` instance
-	///
-	/// # Safety
-	///
-	/// This function is unsafe because it:
-	/// - Allocates memory with malloc
-	/// - Sets up signal handlers
-	/// - Modifies global process state
 	#[must_use]
 	pub unsafe fn new() -> *mut Self {
 		unsafe {
@@ -200,22 +210,17 @@ impl SignalHandlers {
 			// Check if this is a new thread that should inherit signal handlers
 			let should_inherit = {
 				let registry = crate::core::thread_registry::registry();
-				// Only inherit if we're not the main thread and the parent shares signal handlers
 				registry.get_current_thread_info().is_some_and(|thread_info| {
 					thread_info.parent_thread_id.is_some() && thread_info.shares_signal_handlers()
 				})
 			};
 
 			if should_inherit {
-				// This is a thread that should inherit signal handlers from its parent
 				if let Some(parent_info) = crate::core::thread_registry::registry().get_current_parent_thread_info() {
-					// Get the parent's signal handlers
 					let parent_gsreldata = parent_info.gsreldata;
 					if !parent_gsreldata.is_null() {
-						// Get the parent's signal handlers
 						let parent_signal_handlers = *(*parent_gsreldata).signal_handlers.get();
 						if !parent_signal_handlers.is_null() {
-							// We need to fetch the parent's handlers using their thread key
 							let parent_key = parent_gsreldata as usize;
 							let parent_cache_ptr = (*parent_gsreldata).hazard_slot_idx.get();
 
@@ -236,8 +241,6 @@ impl SignalHandlers {
 					}
 				}
 			} else {
-				// This is a new process or a thread that doesn't share signal handlers
-				// Now properly handle signal actions
 				for i in 1..NSIG {
 					if i == libc::SIGKILL as usize {
 						continue;
@@ -469,7 +472,6 @@ impl SignalHandlers {
 		);
 
 		if gsreldata.is_null() {
-			// Fallback during early initialization: OS Thread ID and a temporary cache pointer
 			let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
 			let mut dummy_cache = usize::MAX;
 			(tid, &raw mut dummy_cache)
@@ -479,19 +481,9 @@ impl SignalHandlers {
 	}
 
 	pub unsafe fn handle_app_sigaction(&self, signo: c_int, newact: *const sigaction, oldact: *mut sigaction) -> i64 {
-		// Log the signal action request
-		tracing::trace!(
-			"handle_app_sigaction: signo={}, newact={:?}, oldact={:?}",
-			signo,
-			newact,
-			oldact
-		);
-
 		let (thread_key, cache_ptr) = Self::get_thread_context();
 
 		if signo == libc::SIGSYS {
-			// Handle SIGSYS specially - we ignore registration for SIGSYS
-			// and always terminate the program on non-SUD SIGSYS
 			if !newact.is_null() {
 				assert_eq!((unsafe { *newact }).sa_flags & SA_UNSUPPORTED, 0);
 			}
@@ -523,7 +515,6 @@ impl SignalHandlers {
 		if (unsafe { *newact }).sa_sigaction == SIG_DFL {
 			let result = unsafe { rt_sigaction_raw(signo, newact, oldact, 8) };
 			if result == 0 {
-				// Get old value before updating
 				let old = if oldact.is_null() {
 					unsafe { mem::zeroed() }
 				} else {
@@ -548,7 +539,6 @@ impl SignalHandlers {
 			return i64::from(result);
 		}
 
-		// Get old value before updating
 		let old = if oldact.is_null() {
 			unsafe { mem::zeroed() }
 		} else {
@@ -598,21 +588,10 @@ impl SignalHandlers {
 	}
 
 	/// Determines the default behavior for a given signal
-	///
-	/// # Arguments
-	///
-	/// * `signo` - The signal number
-	///
-	/// # Returns
-	///
-	/// The default disposition type for the specified signal
 	#[allow(clippy::match_same_arms)]
 	const fn get_default_behavior(signo: c_int) -> SigDispType {
 		match signo {
-			// Ignored signals
 			libc::SIGCHLD | libc::SIGURG | libc::SIGWINCH => SigDispType::Ign,
-
-			// Terminating signals
 			libc::SIGALRM
 			| libc::SIGHUP
 			| libc::SIGINT
@@ -626,8 +605,6 @@ impl SignalHandlers {
 			| libc::SIGUSR1
 			| libc::SIGUSR2
 			| libc::SIGVTALRM => SigDispType::Term,
-
-			// Coredump signals
 			libc::SIGABRT
 			| libc::SIGBUS
 			| libc::SIGFPE
@@ -638,27 +615,13 @@ impl SignalHandlers {
 			| libc::SIGTRAP
 			| libc::SIGXCPU
 			| libc::SIGXFSZ => SigDispType::Core,
-
-			// Stop signals
 			libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU => SigDispType::Stop,
-
-			// Cont signals
 			libc::SIGCONT => SigDispType::Cont,
-
 			_ => SigDispType::Term,
 		}
 	}
 
 	/// Determines if a signal would terminate the process by default
-	///
-	/// # Arguments
-	///
-	/// * `signo` - The signal number
-	///
-	/// # Returns
-	///
-	/// `true` if the signal would terminate the process (with or without core dump),
-	/// `false` otherwise
 	#[allow(dead_code)]
 	fn is_terminating_sig(signo: c_int) -> bool {
 		let behavior = Self::get_default_behavior(signo);
@@ -666,10 +629,6 @@ impl SignalHandlers {
 	}
 
 	/// Creates a deep copy of these signal handlers
-	///
-	/// # Returns
-	///
-	/// A new `SignalHandlers` instance that is a copy of this one
 	#[must_use]
 	pub unsafe fn clone(&self) -> *mut Self {
 		let new_handlers = unsafe { libc::malloc(std::mem::size_of::<Self>()).cast::<Self>() };

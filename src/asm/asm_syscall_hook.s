@@ -96,19 +96,14 @@
 .endm
 
 .macro exit_interposer
-    movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
+    movb $SYSCALL_DISPATCH_FILTER_BLOCK, %gs:SUD_SELECTOR_OFFSET
 .endm
 
 asm_syscall_hook:
     # Pop the saved rax from when we did the trampoline jump
     popq %rax
 
-    subq $128, %rsp
-
-    # At this point, the register & stack state is exactly as at the
-    # syscall invocation site, except that the rip_after_syscall is
-    # pushed to the stack at 128(%rsp)
-
+    # Unblock SUD
     movb $SYSCALL_DISPATCH_FILTER_ALLOW, %gs:SUD_SELECTOR_OFFSET
 
     pushq %r12  # We use it to check whether we should emulate the syscall or not
@@ -134,10 +129,6 @@ asm_syscall_hook:
     
     teardown_c_stack
     xrstor_vector_regs_from_gsrel
-
-    # At this point, all of our handling mingling has been undone
-    # Most of the register state is the same as before (minus clobbered regs & rax & r12)
-    # The stack is the same as during syscall invocation, plus the rip_after_syscall and r12
 
     # Check whether we have to emulate some special system calls
     test %r12, %r12 # If !should_emulate: do nothing
@@ -175,16 +166,32 @@ asm_syscall_hook:
 
 .do_nothing:
     exit_interposer
-    addq $136, %rsp
-    jmp *-8(%rsp)
+    ret
 
 .do_rt_sigreturn:
-    # All the syscall arguments in rdi etc should still be in the original state
-    # But they don't matter for sigreturn
+    addq $8, %rsp # discard the pushed return address
 
-    addq $136, %rsp # Discard the pushed return address and skip red zone padding
-    # `wrap_signal_handler` will have set REG_RIP to `restore_selector_trampoline`
-    # and the original RIP to return to is pushed to the stack of the original program
+    pushq %rdx
+    # Retrieve selector on entry from the sigreturn stack
+    movq %gs:SIGRETURN_STACK_SP_OFFSET, %rdx
+    subq $8, %rdx
+    movq %rdx, %gs:SIGRETURN_STACK_SP_OFFSET
+    movq (%rdx), %rdx
+    cmpq $0, %rdx
+    popq %rdx
+    je .sigreturn_syscall # Only restore SUD selector if selector at entry was BLOCK
+
+    pushq %rdi
+    movq %rsp, %rdi
+    addq $8, %rdi # rdi now points to ucontext_t on the stack
+    pushq %rax
+    setup_c_stack
+    callq setup_restore_selector_trampoline
+    teardown_c_stack
+    popq %rax
+    popq %rdi
+
+.sigreturn_syscall:
     syscall 
     ud2
     int3
@@ -198,13 +205,57 @@ asm_syscall_hook:
     testq %rsi, %rsi
     jz .do_clone_syscall
 
-    # Push the right return address to the child's stack as well
-    pushq %r11
-    # Note: 136(%rsp) because we just pushed r11
-    movq 136(%rsp), %r11 # rip_after_syscall -> clobbered reg
-    subq $136, %rsi # Make space on the child stack and respect red zone
-    movq %r11, 128(%rsi) # rip_after_syscall -> new top of child stack
-    popq %r11
+    # Extract rip_after_syscall before manipulating stack
+    movq (%rsp), %r10
+
+    # Pre-adjust the child's stack pointer in %rsi without dereferencing it
+    subq $8, %rsi 
+
+    # Build a strictly defined child context on the parent's stack
+    pushq %rsi  # 24(%rsp) modified_child_stack_ptr
+    pushq %r10  # 16(%rsp) rip_after_syscall
+    pushq %r12  # 8(%rsp)  original_r12
+    pushq $1    # 0(%rsp)  spinlock (1 = locked by parent)
+    movq %rsp, %r12
+
+    # Execute clone syscall
+    syscall
+
+    testq %rax, %rax
+    jz .new_thread_init
+    js .Lclone_failed 
+
+.Lwait_child:
+    cmpq $0, (%r12)
+    je .Lclone_done
+    pause
+    jmp .Lwait_child
+
+.Lclone_failed:
+.Lclone_done:
+    # Cleanup child context frame
+    movq %r12, %rsp
+    addq $8, %rsp
+    popq %r12
+    addq $16, %rsp
+    
+    exit_interposer
+    ret
+
+.new_thread_init:
+    # Child thread context
+    movq 16(%r12), %r11  # rip_after_syscall
+    movq 8(%r12), %rcx   # original_r12
+
+    movq $0, (%r12)      # Unlock parent IMMEDIATELY
+
+    # Write return address precisely where `ret` will look for it
+    # Kernel already sets child %rsp to the modified %rsi
+    movq %r11, (%rsp)
+
+    movq %rcx, %r12      # Restore original r12
+    jmp .new_thread
+
 
 .do_clone_syscall:
     # All args are still set up as original
@@ -213,12 +264,10 @@ asm_syscall_hook:
     jz .new_thread
     # Parent here: either done, or error
     exit_interposer
-    addq $136, %rsp
-    jmp *-8(%rsp)
+    ret
 
 .do_fork:
     # fork() takes no arguments, child gets a COW copy of the stack.
-    # No need to push return address on a new stack pointer.
     jmp .do_clone_syscall
 
 .do_clone3:
@@ -243,29 +292,112 @@ asm_syscall_hook:
     testq %r9, %r9
     jz .do_clone_syscall
 
-    pushq %r11
-    movq 136(%rsp), %r11 # rip_after_syscall -> clobbered reg
+    # Extract rip_after_syscall before manipulating stack
+    movq (%rsp), %r10
+
+    # Adjust stack size for our return address overhead
+    subq $8, %r9
+
+    # Build a strictly defined clone3 child context on the parent's stack
+    pushq %r9   # 40(%rsp) modified_stack_size
+    pushq %r8   # 32(%rsp) original_stack_base
+    pushq %rdi  # 24(%rsp) original_clone_args_ptr
+    pushq %r10  # 16(%rsp) rip_after_syscall
+    pushq %r12  # 8(%rsp)  original_r12
+    pushq $1    # 0(%rsp)  spinlock (1 = locked)
+    movq %rsp, %r12
+
+    # PREVENT RO MEMORY CRASH: We must copy clone_args to the parent stack 
+    # before modifying stack_size to prevent crashing on const user structs.
+    pushq %rbp
+    movq %rsp, %rbp
     
-    # Adjust stack size to make room on the child stack (128 red zone + 8 return addr)
-    subq $136, %r9
-    movq %r9, 48(%rdi)   # Write back new stack_size to struct clone_args
+    # Dynamically allocate space for clone_args based on %rsi length
+    movq %rsp, %r11
+    subq %rsi, %r11
+    andq $-16, %r11
+    movq %r11, %rsp
+
+    # Copy the struct from %rdi to the allocated %rsp buffer
+    pushq %rcx
+    pushq %rsi
+    pushq %rdi
     
-    # Calculate the new top of the child stack: stack (bottom) + stack_size
+    movq %rsi, %rcx
+    movq %rdi, %rsi
+    movq %rsp, %rdi
+    addq $24, %rdi # Offset destination past our pushed registers
+    rep movsb
+    
+    popq %rdi # original clone_args ptr
+    popq %rsi # size
+    popq %rcx
+    
+    movq %rsp, %rdi # Update %rdi to point to our stack-allocated clone_args
+
+    # Write the modified stack_size to our copied struct safely
+    movq %r9, 48(%rdi)
+
+    # Execute clone3 with modified struct pointer
+    syscall
+
+    testq %rax, %rax
+    jz .new_thread_init_clone3
+    js .Lclone3_failed 
+
+.Lwait_child_clone3:
+    cmpq $0, (%r12)
+    je .Lclone3_done
+    pause
+    jmp .Lwait_child_clone3
+
+.Lclone3_failed:
+.Lclone3_done:
+    # Teardown the dynamically allocated struct buffer
+    movq %rbp, %rsp
+    popq %rbp
+
+    # Teardown the child context
+    movq %r12, %rsp
+    addq $8, %rsp
+    popq %r12
+    addq $32, %rsp
+
+    exit_interposer
+    ret
+
+
+.new_thread_init_clone3:
+    # Child thread context for clone3
+    movq 16(%r12), %r11  # rip_after_syscall
+    movq 24(%r12), %rdi  # original_clone_args_ptr
+    movq 32(%r12), %r8   # original_stack_base
+    movq 40(%r12), %r9   # modified_stack_size
+    movq 8(%r12), %rcx   # original_r12
+
+    movq $0, (%r12)      # Unlock parent IMMEDIATELY
+
+    # Calculate stack top safely inside child context
     addq %r8, %r9
+
+    # Safely write the return address. Faults here will cleanly SIGSEGV the child.
+    movq %r11, (%r9)
+
+    # Restore r12
+    movq %rcx, %r12
+
+    # Extract clone_flags from user's original struct 
+    # to pass it to `setup_new_thread` via %rdi
+    movq 0(%rdi), %rdi
     
-    # Write the return address exactly where `jmp *-8(%rsp)` will look for it
-    # after `.new_thread` adds 136 back to %rsp.
-    movq %r11, 128(%r9)  
-    
-    popq %r11
-    jmp .do_clone_syscall
+    jmp .new_thread
 
 .new_thread:
     # Child running on a completely new stack
     # Save the return code
     pushq %rax
     setup_c_stack
-    # clone_flags should still be in %rdi: perfect
+    # clone_flags must be in %rdi
     callq setup_new_thread
     # Restore registers
     teardown_c_stack
@@ -273,15 +405,14 @@ asm_syscall_hook:
     exit_interposer
     # Cleanup and return to syscall site
     popq %rax
-    addq $136, %rsp
-    jmp *-8(%rsp)
+    ret
 
 .do_vfork:
     # vfork is a really annoying syscall
     # Push the rip_after_syscall to a dedicated stack in the parent's gsrel region
     pushq %rsi
     movq %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET, %rsi
-    movq 136(%rsp), %rcx # rcx is clobbered by syscall anyway
+    movq 8(%rsp), %rcx # rcx is clobbered by syscall anyway
     movq %rcx, (%rsi)
     addq $8, %rsi
     movq %rsi, %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET
@@ -300,11 +431,10 @@ asm_syscall_hook:
     movq (%rsi), %rcx # rcx has to hold `rip_after_syscall` anyway
     movq %rsi, %gs:RIP_AFTER_SYSCALL_STACK_SP_OFFSET
     popq %rsi
-    movq %rcx, 128(%rsp)
+    movq %rcx, (%rsp)
 
     exit_interposer
-    addq $136, %rsp
-    jmp *-8(%rsp)
+    ret
 
 .vforked_child_enable_sud:
     # We will set up a gsrel region here that shares sigdisps with the parent
@@ -315,32 +445,26 @@ asm_syscall_hook:
     popq %rax
     # Lower privileges and return
     exit_interposer
-    addq $136, %rsp
-    jmp *-8(%rsp)
+    ret
 
 .section .text.restore_selector_trampoline,"ax",@progbits
 .p2align 4
 # This is the landingpad for sigreturns from user-supplied signal handlers
 restore_selector_trampoline:
-    # We've intercepted all signal-handler syscalls
-    # Restore the selector to the value it had during the delivery of the signal
+    # due to a potential redzone on the stack we cannot push anything on it including the rip after sigreturn
+    # so we push everything 128 bytes down to avoid this potential redzone
+    subq $128, %rsp
     pushq %rax
-    pushq %rdx
-    pushq %rcx
 
-    # We always enter this trampoline with unblocked SUD
+    # set SUD permissions to blocking
+    movb $SYSCALL_DISPATCH_FILTER_BLOCK, %gs:SUD_SELECTOR_OFFSET
 
-    # Pop & apply saved SUD permissions from the sigreturn stack
+    # restore rip after sigreturn
     movq %gs:SIGRETURN_STACK_SP_OFFSET, %rax
-    decq %rax
-    movb 0(%rax), %dl # Get privilege level into dl
-    movq %rax, %gs:SIGRETURN_STACK_SP_OFFSET # Update sigreturn stack pointer
-    movb %dl, %gs:SUD_SELECTOR_OFFSET
-
-.return_to_app:
-    popq %rcx
-    popq %rdx
+    subq $8, %rax
+    movq %rax, %gs:SIGRETURN_STACK_SP_OFFSET
+    movq (%rax), %rax
+    movq %rax, -0x8(%rsp) # put rip after sigreturn on the bottom of the stack this way we can jump to it without using a register later
     popq %rax
-    # Only orig_rip is on the stack here (from wrap_signal_handler), no red zone gap
-    addq $8, %rsp
-    jmp *-8(%rsp) # Indirect jump to the safely stored RIP
+    addq $128, %rsp
+    jmp *-0x90(%rsp) # old RIP sits at top of stack

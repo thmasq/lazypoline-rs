@@ -18,7 +18,10 @@
 # Linux syscall numbers
 .set __NR_rt_sigreturn, 15
 .set __NR_clone, 56
+.set __NR_fork, 57
 .set __NR_vfork, 58
+.set __NR_sigreturn, 119
+.set __NR_clone3, 435
 
 .set SYSCALL_DISPATCH_FILTER_ALLOW, 0
 .set SYSCALL_DISPATCH_FILTER_BLOCK, 1
@@ -147,16 +150,26 @@ asm_syscall_hook:
     # Check whether we have to sigreturn
     cmpq $__NR_rt_sigreturn, %rax
     je .do_rt_sigreturn
+    cmpq $__NR_sigreturn, %rax
+    je .do_rt_sigreturn
 
     # Check whether we have to clone
     cmpq $__NR_clone, %rax
     je .do_clone_thread_or_clone_vfork
 
+    # Check whether we have to clone3
+    cmpq $__NR_clone3, %rax
+    je .do_clone3
+
     # Check whether we have to vfork
     cmpq $__NR_vfork, %rax
     je .do_vfork
 
-    # If neither of the above, something's wrong
+    # Check whether we have to fork
+    cmpq $__NR_fork, %rax
+    je .do_fork
+
+    # If none of the above, something's wrong
     ud2
     int3
 
@@ -177,6 +190,10 @@ asm_syscall_hook:
     int3
 
 .do_clone_thread_or_clone_vfork:
+    # Check if CLONE_VFORK (0x4000) is set in clone_flags (%rdi)
+    testq $0x4000, %rdi
+    jnz .do_vfork
+
     # Check if rsi is 0 (which means it's a fork() where child inherits parent's stack)
     testq %rsi, %rsi
     jz .do_clone_syscall
@@ -186,7 +203,7 @@ asm_syscall_hook:
     # Note: 136(%rsp) because we just pushed r11
     movq 136(%rsp), %r11 # rip_after_syscall -> clobbered reg
     subq $136, %rsi # Make space on the child stack and respect red zone
-    movq %r11, 0x0(%rsi) # rip_after_syscall -> new top of child stack
+    movq %r11, 128(%rsi) # rip_after_syscall -> new top of child stack
     popq %r11
 
 .do_clone_syscall:
@@ -198,6 +215,50 @@ asm_syscall_hook:
     exit_interposer
     addq $136, %rsp
     jmp *-8(%rsp)
+
+.do_fork:
+    # fork() takes no arguments, child gets a COW copy of the stack.
+    # No need to push return address on a new stack pointer.
+    jmp .do_clone_syscall
+
+.do_clone3:
+    # clone3() passes a struct clone_args pointer in %rdi and size in %rsi.
+    
+    # Check if CLONE_VFORK (0x4000) is set in clone_args->flags (offset 0)
+    movq 0(%rdi), %r11
+    testq $0x4000, %r11
+    jnz .do_vfork
+
+    # Check if struct size is at least 56 (includes stack_size at offset 48)
+    cmpq $56, %rsi
+    jl .do_clone_syscall
+
+    # Check if stack pointer is provided (clone_args->stack is at offset 40)
+    movq 40(%rdi), %r8
+    testq %r8, %r8
+    jz .do_clone_syscall
+
+    # Check if stack_size > 0 (clone_args->stack_size is at offset 48)
+    movq 48(%rdi), %r9
+    testq %r9, %r9
+    jz .do_clone_syscall
+
+    pushq %r11
+    movq 136(%rsp), %r11 # rip_after_syscall -> clobbered reg
+    
+    # Adjust stack size to make room on the child stack (128 red zone + 8 return addr)
+    subq $136, %r9
+    movq %r9, 48(%rdi)   # Write back new stack_size to struct clone_args
+    
+    # Calculate the new top of the child stack: stack (bottom) + stack_size
+    addq %r8, %r9
+    
+    # Write the return address exactly where `jmp *-8(%rsp)` will look for it
+    # after `.new_thread` adds 136 back to %rsp.
+    movq %r11, 128(%r9)  
+    
+    popq %r11
+    jmp .do_clone_syscall
 
 .new_thread:
     # Child running on a completely new stack
